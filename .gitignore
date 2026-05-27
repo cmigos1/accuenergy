@@ -1,4 +1,11 @@
-.cache
 .pio
-.venv
+ESP-Network/.vscode/.browse.c_cpp.db*
+.ESP-Network/c_cpp_properties.json
+.ESP-Network/launch.json
+.ESP-Network/ipch
+backend/venv
+.claude
+STM-Amostrador/build
+*.vscode
 .vscode
+STM-Amostrador/.settings

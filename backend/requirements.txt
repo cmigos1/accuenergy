@@ -1,0 +1,4 @@
+paho-mqtt>=1.6
+pandas>=1.5
+numpy>=1.23
+tables>=3.8        # PyTables — necessário para pd.HDFStore com formato HDF5

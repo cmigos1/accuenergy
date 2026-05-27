@@ -1,156 +1,79 @@
 # Projeto Accuenergy - Monitoramento de Energia (NILM)
 
-Este repositório, no estado atual, concentra o desenvolvimento em dois blocos:
+Este repositório concentra o desenvolvimento de um sistema descentralizado para monitoramento elétrico e evolução para estratégias de NILM (Non-Intrusive Load Monitoring).
 
-1. Firmware de aquisição e processamento no ESP32 usando ADC interno.
-2. Aplicação desktop em Python para visualização em tempo real, FFT e calibração.
+O estado atual divide o sistema em três blocos principais: aquisição de alta velocidade com STM32, ponte IoT via ESP32, e ingestão de dados / interface via Python no backend.
 
-O objetivo geral continua sendo monitoramento elétrico e evolução para estratégias de NILM, com base em sinais de tensão e corrente.
+## Estado Atual da Arquitetura
 
-## Estado Atual
+### 1) STM-Amostrador (Aquisição de Hardware e Processamento de Sinal)
+Local: `STM-Amostrador/`
 
-- O código ativo de firmware está em `esp32_interno/` (PlatformIO + Arduino).
-- A interface de visualização e calibração está em `visualizacao/` (Tkinter + Matplotlib).
-- A pasta `docs/` reúne artigos e datasheets de sensores.
+O coração da aquisição de dados rodando em um microcontrolador STM32H7. Ele atua como um medidor inteligente embarcado que captura sinais de tensão e corrente em alta velocidade.
+- Realiza matemática complexa para calcular métricas de energia ($V_{rms}$, $I_{rms}$, Potência Ativa $P$, Reativa $Q$, Fator de Potência).
+- Calcula harmônicas baseadas num buffer de 1024 amostras.
+- Contém drivers (`st7735`) para atualização de um pequeno display LCD local para monitoramento em tempo real.
+- **Saída:** Transmite as métricas compiladas continuamente como frames em protocolo binário pela porta Serial (UART).
 
-## Arquitetura Atual
+### 2) ESP-Network (Ponte de Conectividade IoT e MQTT)
+Local: `ESP-Network/`
 
-### 1) ESP32 interno (amostragem + cálculo + envio)
+Firmware escrito em C++ para ESP32 utilizando o PlatformIO. O firmware serve como uma ponte de comunicação.
+- Conecta fisicamente ao STM32 via Serial, processando e bufferizando os dados de telemetria baseados no protocolo customizado do STM32.
+- Gerencia conectividade Wi-Fi e se encarrega de publicar os relatórios para um broker MQTT via rede.
+- Lida com métricas unificadas e persistência, como salvamento cumulativo de kWh no sistema de arquivos local (LittleFS).
 
-Local: `esp32_interno/`
+### 3) Backend (Ingestão de Dados, Interface Gráfica e Análise NILM)
+Local: `backend/`
 
-Resumo técnico:
-- Amostragem de dois canais ADC1:
-	- Tensão: GPIO34 (`ADC1_CHANNEL_6`)
-	- Corrente: GPIO35 (`ADC1_CHANNEL_7`)
-- Taxa alvo de amostragem: 7200 Hz.
-- Janela de processamento: 600 amostras (5 ciclos de 60 Hz).
-- Execução em tarefas FreeRTOS:
-	- Core 1: amostragem contínua
-	- Core 0: cálculo e envio
-- Cálculos principais:
-	- `V_RMS`, `I_RMS`
-	- potência ativa, reativa e aparente
-	- fator de potência
-- Envio serial em protocolo binário a 230400 baud.
-
-Arquivos principais:
-- `esp32_interno/src/main.cpp`
-- `esp32_interno/src/calculo.cpp`
-- `esp32_interno/src/envio.cpp`
-- `esp32_interno/include/calculo.h`
-- `esp32_interno/include/envio.h`
-
-### 2) GUI Python (visualização + calibração)
-
-Local: `visualizacao/`
-
-Funcionalidades principais:
-- Conexão serial com o ESP32.
-- Exibição em tempo real de grandezas elétricas.
-- Plot de formas de onda de tensão e corrente.
-- Espectro harmônico (FFT).
-- Calibração por fator/offset e apoio por multímetro.
-- Modos de calibração do ADC via comandos seriais.
-
-Arquivo principal:
-- `visualizacao/gui_amostrador_interno.py`
-
-Dependências:
-- listadas em `visualizacao/requirements.txt`
+Um conjunto de scripts Python que atuam como servidor e central de análise de dados.
+- **Ingestão e Interface (`mqtt_ingest.py`, `mqtt_gui.py`, `gui_bridge.py`):** Lida com o parsing em tempo real das filas e mensagens MQTT que vêm do ESP32/Broker, operando uma interface de dashboard para visualização.
+- **Motor NILM (`nilm_engine.py`):** Analisa a variação em formato de degraus de potência ativa ($\Delta P$) e reativa ($\Delta Q$) para deduzir em tempo real (ou off-line) a mudança de estado e tipo de dispositivos eletrodomésticos que são ligados ou desligados baseados em assinaturas de carga.
+- **Tratamento de Dados (`csv_to_hdf5.py`):** Converte registros de arquivos para o formato rápido e otimizado HDF5.
 
 ## Estrutura do Repositório
 
 ```text
 .
+|-- backend/
+|   |-- mqtt_ingest.py
+|   |-- mqtt_gui.py
+|   |-- nilm_engine.py
+|   `-- requirements.txt
 |-- docs/
 |   |-- Artigos relevantes/
 |   `-- Sensores/
-|-- esp32_interno/
+|-- ESP-Network/
 |   |-- platformio.ini
-|   |-- include/
-|   |   |-- calculo.h
-|   |   `-- envio.h
 |   |-- src/
-|   |   |-- calculo.cpp
-|   |   |-- envio.cpp
-|   |   `-- main.cpp
-|   `-- test/
-|-- visualizacao/
-|   |-- gui_amostrador_interno.py
-|   `-- requirements.txt
+|   |   |-- main.cpp
+|   |   `-- config.h
+|-- STM-Amostrador/
+|   |-- CMakeLists.txt
+|   |-- Core/
+|   `-- Drivers/
 `-- readme.md
 ```
 
-## Protocolo Serial Binário
-
-Todos os frames usam:
-- header mágico: `0xAB 0xCD`
-- tipo de frame: 1 byte
-- payload variável
-- footer: `0xEF 0xFE`
-
-Tipos implementados:
-- `0x01` DATA
-	- métricas elétricas + amostras decimadas de V/I
-- `0x02` CAL_POT
-	- estatísticas em mV brutos para calibração por potenciômetro
-- `0x03` CAL_PIN
-	- comparação de ganho entre canais usando mesmo sinal em ambos
-
-Referência de implementação:
-- `esp32_interno/include/envio.h`
-- parser na GUI em `visualizacao/gui_amostrador_interno.py`
-
 ## Como Executar
 
-### 1) Firmware ESP32
+### 1) Firmware STM32
+Projeto gerado para utilização através de um fluxo do CMake ou CubeIDE. Pode compilar através da extensão CMake Tools no VS Code.
 
-Pré-requisitos:
-- VS Code com PlatformIO, ou PlatformIO CLI.
-- Placa ESP32 DevKit (ambiente `esp32dev`).
+### 2) Firmware ESP32
+Pré-requisitos: VS Code com extensão do PlatformIO.
+Na pasta `ESP-Network/`, ajuste o seu Wi-Fi e Broker em `src/config.h` e execute:
+- Upload para a placa ESP32.
 
-Comandos (na pasta `esp32_interno/`):
-
-```bash
-pio run
-pio run -t upload
-pio device monitor -b 230400
-```
-
-### 2) GUI de visualização
-
-Pré-requisitos:
-- Python 3.10+ recomendado.
-
-Comandos (na pasta `visualizacao/`):
-
+### 3) Backend e GUI Python
+Na pasta `backend/`:
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+# ative a venv correspondente ao seu SO
 pip install -r requirements.txt
-python gui_amostrador_interno.py
+python mqtt_gui.py
 ```
 
-## Comandos de Modo (serial)
-
-Comandos aceitos pelo firmware:
-- `NORMAL`
-- `CAL_POT`
-- `CAL_PIN`
-
-A GUI já envia esses comandos pelos botões da aba de calibração.
-
-## Documentação Técnica
-
-Em `docs/`:
-- artigos de NILM para referência de métodos e estado da arte.
-- datasheets e materiais de sensores.
-
-## Observações
-
-- O projeto está em fase de evolução de plataforma e calibração.
-
-## Proximos passos
-- Adição de outro par de sensores (tensão e corrente), para análise bifásica.
-- Alterar a maneira de transferência de dados de serial para Wi-Fi.
+## Próximos passos
+- Evolução de detecção de eventos multicanais / bifásico / trifásico.
+- Aperfeiçoamento dos métodos de classificação no engine NILM.
