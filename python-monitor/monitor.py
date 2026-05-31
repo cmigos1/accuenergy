@@ -1001,6 +1001,16 @@ class MainWindow(QMainWindow):
         self._lbl_fund_i = pg.TextItem('h1', color=C_HARM_I, anchor=(0.5, 1.0))
         self._plt_hi.addItem(self._lbl_fund_i)
 
+        # Ranges iniciais — evita "Cannot set range [nan, nan]" em plots vazios
+        self._plt_v.setXRange(0, T_AXIS_MS[-1], padding=0)
+        self._plt_v.setYRange(-250, 250, padding=0)
+        self._plt_i.setXRange(0, T_AXIS_MS[-1], padding=0)
+        self._plt_i.setYRange(-20, 20, padding=0)
+        self._plt_hv.setXRange(0, HARM_FREQS[-1] + F0_HZ, padding=0)
+        self._plt_hv.setYRange(0, 1, padding=0)
+        self._plt_hi.setXRange(0, HARM_FREQS[-1] + F0_HZ, padding=0)
+        self._plt_hi.setYRange(0, 1, padding=0)
+
         splitter_h.addWidget(wave_widget)
         splitter_h.addWidget(harm_widget)
         splitter_h.setSizes([700, 700])
