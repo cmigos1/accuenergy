@@ -50,7 +50,7 @@
 #define NOISE_CAL_FRAMES    5u     /* frames adquiridos na calibração (×300ms = 1.5s) */
 #define NOISE_CAL_MARGIN    2.2f   /* multiplicador sobre o RMS medido (segurança) */
 #define V_NOISE_FLOOR_MIN   1.0f   /* piso mínimo absoluto de tensão [V] — novo circuito
-                                    * tem ganho menor (fator 136 vs 338); ruído elétrico
+                                    /* tem ganho menor (fator 136 vs 338); ruído elétrico
                                     * equivalente sobe proporcionalmente em Vrms */
 #define I_NOISE_FLOOR_MIN   0.03f  /* piso mínimo absoluto de corrente [A] */
 

@@ -132,6 +132,37 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     /* USER CODE END ADC1_MspInit 1 */
 
   }
+  else if(hadc->Instance==ADC2)
+  {
+    /* USER CODE BEGIN ADC2_MspInit 0 */
+
+    /* USER CODE END ADC2_MspInit 0 */
+
+    /* Clock do kernel ADC (PLL2) e ADC12 já configurados no ramo ADC1 (init antes).
+     * Reabilita o clock do barramento por segurança (idempotente). */
+    __HAL_RCC_ADC12_CLK_ENABLE();
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    /**ADC2 GPIO Configuration
+    PA7     ------> ADC2_INP7
+    PC5     ------> ADC2_INP8
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN ADC2_MspInit 1 */
+
+    /* USER CODE END ADC2_MspInit 1 */
+
+  }
 
 }
 

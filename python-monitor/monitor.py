@@ -38,11 +38,13 @@ import pyqtgraph as pg
 
 # ── Constantes do protocolo (espelham calculo.h / main.c do STM32) ────────────
 MAGIC        = bytes([0xAB, 0xCD])
-FRAME_POWER  = 0x01
-FRAME_HARM   = 0x02
+FRAME_POWER  = 0x01    # potência fase 1 (ADC1, PA6/PC4)
+FRAME_HARM   = 0x02    # harmônicos fase 1
+FRAME_POWER2 = 0x03    # potência fase 2 (ADC2, PA7/PC5) — análise bifásica
+FRAME_HARM2  = 0x04    # harmônicos fase 2
 FOOTER       = bytes([0xEF, 0xFE])
 
-FRAME1_TOTAL   = 543
+FRAME1_TOTAL   = 1055
 FRAME1_SAMPLES = 128
 FRAME2_TOTAL   = 413
 HARM_MAX       = 50
@@ -61,18 +63,18 @@ HARM_FREQS = np.arange(1, HARM_MAX + 1, dtype=float) * F0_HZ
 
 
 # ── Parser de frames ───────────────────────────────────────────────────────────
-def parse_frame1(data: bytes) -> dict | None:
+def parse_frame1(data: bytes, ftype: int = FRAME_POWER) -> dict | None:
     if len(data) < FRAME1_TOTAL:
         return None
-    if data[0:2] != MAGIC or data[2] != FRAME_POWER:
+    if data[0:2] != MAGIC or data[2] != ftype:
         return None
-    if data[541:543] != FOOTER:
+    if data[FRAME1_TOTAL-2:FRAME1_TOTAL] != FOOTER:
         return None
     vrms, irms, fp, preal, q, s = struct.unpack_from('<6f', data, 3)
     n_samp = data[27]
     if n_samp != FRAME1_SAMPLES:
         return None
-    raw      = struct.unpack_from(f'<{n_samp * 2}h', data, 29)
+    raw      = struct.unpack_from(f'<{n_samp * 2}i', data, 29)
     v_counts = np.array(raw[0::2], dtype=np.float32)
     i_counts = np.array(raw[1::2], dtype=np.float32)
     return {
@@ -83,10 +85,10 @@ def parse_frame1(data: bytes) -> dict | None:
     }
 
 
-def parse_frame2(data: bytes) -> dict | None:
+def parse_frame2(data: bytes, ftype: int = FRAME_HARM) -> dict | None:
     if len(data) < FRAME2_TOTAL:
         return None
-    if data[0:2] != MAGIC or data[2] != FRAME_HARM:
+    if data[0:2] != MAGIC or data[2] != ftype:
         return None
     if data[411:413] != FOOTER:
         return None
@@ -131,20 +133,20 @@ class SerialReader(threading.Thread):
             if len(buf) < 3:
                 return
             ftype = buf[2]
-            if ftype == FRAME_POWER:
+            if ftype in (FRAME_POWER, FRAME_POWER2):
                 if len(buf) < FRAME1_TOTAL:
                     return
-                parsed = parse_frame1(bytes(buf[:FRAME1_TOTAL]))
+                parsed = parse_frame1(bytes(buf[:FRAME1_TOTAL]), ftype)
                 del buf[:FRAME1_TOTAL]
                 if parsed:
-                    self.q.put(('power', parsed))
-            elif ftype == FRAME_HARM:
+                    self.q.put(('power' if ftype == FRAME_POWER else 'power2', parsed))
+            elif ftype in (FRAME_HARM, FRAME_HARM2):
                 if len(buf) < FRAME2_TOTAL:
                     return
-                parsed = parse_frame2(bytes(buf[:FRAME2_TOTAL]))
+                parsed = parse_frame2(bytes(buf[:FRAME2_TOTAL]), ftype)
                 del buf[:FRAME2_TOTAL]
                 if parsed:
-                    self.q.put(('harm', parsed))
+                    self.q.put(('harm' if ftype == FRAME_HARM else 'harm2', parsed))
             else:
                 del buf[:3]
 
@@ -193,8 +195,12 @@ class DataRecorder:
 
     CSV_HEADER = [
         'label', 'timestamp_utc',
+        # Fase 1 (ADC1)
         'preal_W', 'paparente_VA', 'preativa_VAr',
         'vrms_V', 'irms_A', 'fp',
+        # Fase 2 (ADC2) — análise bifásica
+        'preal2_W', 'paparente2_VA', 'preativa2_VAr',
+        'vrms2_V', 'irms2_A', 'fp2',
     ]
 
     _METER_MSMTS = [
@@ -283,17 +289,25 @@ class DataRecorder:
         vrms:  float, irms:  float,
         preal: float, pap:   float,
         prea:  float, fp:    float,
+        p2:    dict | None = None,
     ):
-        """Adiciona medição ao segmento ativo (no-op se não estiver gravando)."""
+        """Adiciona medição ao segmento ativo (no-op se não estiver gravando).
+
+        p2: dict opcional com as grandezas da fase 2 (chaves vrms/irms/preal/
+        pap/prea/fp). None quando só há fase 1 disponível."""
         if not self._active:
             return
         row = {'ts': ts, 'vrms': vrms, 'irms': irms,
-               'preal': preal, 'pap': pap, 'prea': prea, 'fp': fp}
+               'preal': preal, 'pap': pap, 'prea': prea, 'fp': fp,
+               'p2': p2}
         self._active['rows'].append(row)
         if self._csv_writer:
+            p = p2 or {}
             self._csv_writer.writerow([
                 self._active['label'], ts.isoformat(),
                 preal, pap, prea, vrms, irms, fp,
+                p.get('preal', ''), p.get('pap', ''), p.get('prea', ''),
+                p.get('vrms', ''),  p.get('irms', ''), p.get('fp', ''),
             ])
 
     def remove_last_segment(self) -> str | None:
@@ -340,19 +354,29 @@ class DataRecorder:
         result      = {}
         meters_meta = {}
 
+        # Cada segmento vira 1 meter por fase: F1 sempre, F2 se houver dados
+        # bifásicos gravados. Meters numerados sequencialmente.
+        meter_idx = 0
         with pd.HDFStore(str(hdf5_path), mode='w', complevel=5, complib='blosc') as store:
-            for meter_idx, seg in enumerate(all_segs, start=1):
-                df  = _rows_to_df(seg['rows'], col_idx, timezone, resample_s)
-                key = f'/building{building}/elec/meter{meter_idx}'
-                store.put(key, df, format='table', data_columns=True)
-                result[seg['label']] = len(df)
-                meters_meta[meter_idx] = {
-                    'device':      'stm32_accuenergy',
-                    'submeter_of': None,
-                    'site_meter':  meter_idx == 1,
-                    'label':       seg['label'],
-                    'n_rows':      len(df),
-                }
+            for seg in all_segs:
+                has_p2 = any(r.get('p2') for r in seg['rows'])
+                phases = [('F1', 1)] + ([('F2', 2)] if has_p2 else [])
+                for tag, phase in phases:
+                    meter_idx += 1
+                    df    = _rows_to_df(seg['rows'], col_idx, timezone, resample_s, phase)
+                    key   = f'/building{building}/elec/meter{meter_idx}'
+                    label = f"{seg['label']} {tag}" if has_p2 else seg['label']
+                    # data_columns omitido: incompatível com colunas MultiIndex
+                    # nas versões recentes do pandas (ValueError). NILMTK não exige.
+                    store.put(key, df, format='table')
+                    result[label] = len(df)
+                    meters_meta[meter_idx] = {
+                        'device':      'stm32_accuenergy',
+                        'submeter_of': None,
+                        'site_meter':  meter_idx == 1,
+                        'label':       label,
+                        'n_rows':      len(df),
+                    }
 
         _write_metadata_json(hdf5_path, building, meters_meta,
                              timezone, self._METER_MSMTS)
@@ -360,14 +384,21 @@ class DataRecorder:
 
 
 # ── Helpers de exportação ─────────────────────────────────────────────────────
-def _rows_to_df(rows, col_idx, timezone, resample_s):
+def _rows_to_df(rows, col_idx, timezone, resample_s, phase=1):
     import pandas as pd
-    idx  = pd.DatetimeIndex([r['ts'] for r in rows], tz='UTC').tz_convert(timezone)
-    data = np.array(
-        [[r['preal'], r['pap'], r['prea'], r['vrms'], r['irms'], r['fp']]
-         for r in rows],
-        dtype=np.float32,
-    )
+    idx = pd.DatetimeIndex([r['ts'] for r in rows], tz='UTC').tz_convert(timezone)
+    if phase == 1:
+        data = np.array(
+            [[r['preal'], r['pap'], r['prea'], r['vrms'], r['irms'], r['fp']]
+             for r in rows],
+            dtype=np.float32,
+        )
+    else:
+        def _p2(r):
+            p = r.get('p2') or {}
+            return [p.get('preal', 0.0), p.get('pap', 0.0), p.get('prea', 0.0),
+                    p.get('vrms', 0.0),  p.get('irms', 0.0), p.get('fp', 0.0)]
+        data = np.array([_p2(r) for r in rows], dtype=np.float32)
     df = pd.DataFrame(data, index=idx, columns=col_idx)
     df.index.name = 'datetime'
     df = df[~df.index.duplicated(keep='last')]
@@ -490,6 +521,8 @@ BG_PANEL = '#24243e'
 BG_CARD  = '#2a2a42'
 C_V      = '#89b4fa'
 C_I      = '#f38ba8'
+C_V2     = '#94e2d5'   # fase 2 — tensão (teal)
+C_I2     = '#fab387'   # fase 2 — corrente (peach)
 C_P      = '#a6e3a1'
 C_Q      = '#cba6f7'
 C_S      = '#89dceb'
@@ -767,6 +800,7 @@ class MainWindow(QMainWindow):
         self._connected   = False
         self._recorder    = DataRecorder()
         self._csv_session_path: str | None = None
+        self._last_p2: dict | None = None   # últimas grandezas da fase 2 (frame 0x03)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -919,18 +953,28 @@ class MainWindow(QMainWindow):
         lay.setSpacing(6)
         self._cards: dict[str, MetricCard] = {}
         defs = [
-            ('Vrms',  'V',   C_V,    0, 0),
-            ('Irms',  'A',   C_I,    0, 1),
-            ('P',     'W',   C_P,    0, 2),
-            ('Q',     'VAR', C_Q,    0, 3),
-            ('S',     'VA',  C_S,    0, 4),
-            ('FP',    '',    C_FP,   0, 5),
-            ('THD_V', '%',   C_THDV, 0, 6),
-            ('THD_I', '%',   C_THDI, 0, 7),
+            # Fase 1 (ADC1) — linha 0
+            ('Vrms',   'V (F1)',   C_V,    0, 0),
+            ('Irms',   'A (F1)',   C_I,    0, 1),
+            ('P',      'W (F1)',   C_P,    0, 2),
+            ('Q',      'VAR (F1)', C_Q,    0, 3),
+            ('S',      'VA (F1)',  C_S,    0, 4),
+            ('FP',     '(F1)',     C_FP,   0, 5),
+            ('THD_V',  '% (F1)',   C_THDV, 0, 6),
+            ('THD_I',  '% (F1)',   C_THDI, 0, 7),
+            # Fase 2 (ADC2) — linha 1
+            ('Vrms2',  'V (F2)',   C_V2,   1, 0),
+            ('Irms2',  'A (F2)',   C_I2,   1, 1),
+            ('P2',     'W (F2)',   C_P,    1, 2),
+            ('Q2',     'VAR (F2)', C_Q,    1, 3),
+            ('S2',     'VA (F2)',  C_S,    1, 4),
+            ('FP2',    '(F2)',     C_FP,   1, 5),
+            ('THD_V2', '% (F2)',   C_THDV, 1, 6),
+            ('THD_I2', '% (F2)',   C_THDI, 1, 7),
         ]
         for key, unit, color, row, col in defs:
-            card = MetricCard(key, unit, color)
-            card.setMinimumHeight(90)
+            card = MetricCard(key.rstrip('2') if key.endswith('2') else key, unit, color)
+            card.setMinimumHeight(78)
             lay.addWidget(card, row, col)
             self._cards[key] = card
         return lay
@@ -950,7 +994,9 @@ class MainWindow(QMainWindow):
         self._plt_v.setLabel('bottom', 'Tempo (ms)')
         self._plt_v.showGrid(x=True, y=True, alpha=0.2)
         self._plt_v.addLegend(offset=(10, 10))
-        self._curve_v = self._plt_v.plot(pen=pg.mkPen(C_V, width=2), name='V(t)')
+        self._curve_v = self._plt_v.plot(pen=pg.mkPen(C_V, width=2), name='V1(t)')
+        self._curve_v2 = self._plt_v.plot(
+            pen=pg.mkPen(C_V2, width=2, style=Qt.DashLine), name='V2(t)')
         self._line_vrms_pos = pg.InfiniteLine(
             angle=0, pen=pg.mkPen(C_V, width=1, style=Qt.DashLine))
         self._line_vrms_neg = pg.InfiniteLine(
@@ -964,7 +1010,9 @@ class MainWindow(QMainWindow):
         self._plt_i.setLabel('bottom', 'Tempo (ms)')
         self._plt_i.showGrid(x=True, y=True, alpha=0.2)
         self._plt_i.addLegend(offset=(10, 10))
-        self._curve_i = self._plt_i.plot(pen=pg.mkPen(C_I, width=2), name='I(t)')
+        self._curve_i = self._plt_i.plot(pen=pg.mkPen(C_I, width=2), name='I1(t)')
+        self._curve_i2 = self._plt_i.plot(
+            pen=pg.mkPen(C_I2, width=2, style=Qt.DashLine), name='I2(t)')
         self._line_irms_pos = pg.InfiniteLine(
             angle=0, pen=pg.mkPen(C_I, width=1, style=Qt.DashLine))
         self._line_irms_neg = pg.InfiniteLine(
@@ -975,7 +1023,9 @@ class MainWindow(QMainWindow):
 
         harm_widget = pg.GraphicsLayoutWidget()
         harm_widget.setBackground(BG_DARK)
-        bar_w = (HARM_FREQS[1] - HARM_FREQS[0]) * 0.6
+        spacing = HARM_FREQS[1] - HARM_FREQS[0]
+        bar_w   = spacing * 0.3          # metade da largura → duas fases lado a lado
+        off     = bar_w / 2.0            # deslocamento ± para separar F1/F2
 
         self._plt_hv = harm_widget.addPlot(row=0, col=0)
         self._plt_hv.setTitle('<b>Harmônicas de Tensão</b>', color=C_HARM_V, size='11pt')
@@ -983,9 +1033,13 @@ class MainWindow(QMainWindow):
         self._plt_hv.setLabel('bottom', 'Frequência (Hz)')
         self._plt_hv.showGrid(x=False, y=True, alpha=0.2)
         self._bars_hv = pg.BarGraphItem(
-            x=HARM_FREQS, height=np.zeros(HARM_MAX), width=bar_w,
+            x=HARM_FREQS - off, height=np.zeros(HARM_MAX), width=bar_w,
             brush=pg.mkBrush(C_HARM_V + 'cc'), pen=pg.mkPen(C_HARM_V, width=1))
+        self._bars_hv2 = pg.BarGraphItem(
+            x=HARM_FREQS + off, height=np.zeros(HARM_MAX), width=bar_w,
+            brush=pg.mkBrush(C_V2 + 'cc'), pen=pg.mkPen(C_V2, width=1))
         self._plt_hv.addItem(self._bars_hv)
+        self._plt_hv.addItem(self._bars_hv2)
         self._lbl_fund_v = pg.TextItem('h1', color=C_HARM_V, anchor=(0.5, 1.0))
         self._plt_hv.addItem(self._lbl_fund_v)
 
@@ -995,9 +1049,13 @@ class MainWindow(QMainWindow):
         self._plt_hi.setLabel('bottom', 'Frequência (Hz)')
         self._plt_hi.showGrid(x=False, y=True, alpha=0.2)
         self._bars_hi = pg.BarGraphItem(
-            x=HARM_FREQS, height=np.zeros(HARM_MAX), width=bar_w,
+            x=HARM_FREQS - off, height=np.zeros(HARM_MAX), width=bar_w,
             brush=pg.mkBrush(C_HARM_I + 'cc'), pen=pg.mkPen(C_HARM_I, width=1))
+        self._bars_hi2 = pg.BarGraphItem(
+            x=HARM_FREQS + off, height=np.zeros(HARM_MAX), width=bar_w,
+            brush=pg.mkBrush(C_I2 + 'cc'), pen=pg.mkPen(C_I2, width=1))
         self._plt_hi.addItem(self._bars_hi)
+        self._plt_hi.addItem(self._bars_hi2)
         self._lbl_fund_i = pg.TextItem('h1', color=C_HARM_I, anchor=(0.5, 1.0))
         self._plt_hi.addItem(self._lbl_fund_i)
 
@@ -1053,8 +1111,12 @@ class MainWindow(QMainWindow):
                 if kind == 'power':
                     self._apply_power(data)
                     got_power = True
+                elif kind == 'power2':
+                    self._apply_power2(data)
                 elif kind == 'harm':
                     self._apply_harm(data)
+                elif kind == 'harm2':
+                    self._apply_harm2(data)
                 elif kind == 'error':
                     self._status.showMessage(f'Erro serial: {data}')
                     self._do_disconnect()
@@ -1091,12 +1153,13 @@ class MainWindow(QMainWindow):
         self._line_irms_pos.setPos( irms_pk)
         self._line_irms_neg.setPos(-irms_pk)
 
-        # ── Alimenta o gravador ───────────────────────────────────────────────
+        # ── Alimenta o gravador (fase 1 + última fase 2 conhecida) ────────────
         self._recorder.append(
             ts    = datetime.datetime.now(datetime.timezone.utc),
             vrms  = d['vrms'],  irms  = d['irms'],
             preal = d['preal'], pap   = d['s'],
             prea  = d['q'],     fp    = d['fp'],
+            p2    = self._last_p2,
         )
 
     def _apply_harm(self, d: dict):
@@ -1112,6 +1175,32 @@ class MainWindow(QMainWindow):
         if d['harm_i'][0] > 0:
             self._lbl_fund_i.setText(f"h1={d['harm_i'][0]:.3f}A")
             self._lbl_fund_i.setPos(HARM_FREQS[0], d['harm_i'][0])
+
+    def _apply_power2(self, d: dict):
+        """Frame 0x03 — métricas e formas de onda da fase 2 (ADC2)."""
+        self._cards['Vrms2'].set_value(f"{d['vrms']:.1f}")
+        self._cards['Irms2'].set_value(f"{d['irms']:.3f}")
+        self._cards['P2'].set_value(f"{d['preal']:.1f}")
+        self._cards['Q2'].set_value(f"{d['q']:.1f}")
+        self._cards['S2'].set_value(f"{d['s']:.1f}")
+        self._cards['FP2'].set_value(f"{d['fp']:.3f}")
+
+        self._curve_v2.setData(T_AXIS_MS, d['v_wave'])
+        self._curve_i2.setData(T_AXIS_MS, d['i_wave'])
+
+        # Guarda para o gravador associar à próxima linha (frame 0x01)
+        self._last_p2 = {
+            'vrms': d['vrms'], 'irms': d['irms'], 'preal': d['preal'],
+            'pap':  d['s'],    'prea': d['q'],    'fp':    d['fp'],
+        }
+
+    def _apply_harm2(self, d: dict):
+        """Frame 0x04 — harmônicos e THD da fase 2 (ADC2)."""
+        self._cards['THD_V2'].set_value(f"{d['thd_v'] * 100.0:.1f}")
+        self._cards['THD_I2'].set_value(f"{d['thd_i'] * 100.0:.1f}")
+
+        self._bars_hv2.setOpts(height=d['harm_v'])
+        self._bars_hi2.setOpts(height=d['harm_i'])
 
     # ── Gravação — controles ──────────────────────────────────────────────────
     def _browse_csv(self):

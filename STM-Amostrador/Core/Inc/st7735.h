@@ -30,8 +30,13 @@
 void ST7735_Init(void);
 void ST7735_FillScreen(uint16_t color);
 void ST7735_DrawString(uint8_t x, uint8_t y, const char *s, uint16_t fg, uint16_t bg);
-void ST7735_Debug_Update(float vrms, float irms, float preal, float fp, uint32_t uptime_s,
-                          uint32_t adc_mean_v, uint32_t adc_mean_i,
-                          uint32_t adc_pp_v,   uint32_t adc_pp_i);
+void ST7735_DrawString1x(uint8_t x, uint8_t y, const char *s, uint16_t fg, uint16_t bg);
+
+/* Atualiza o painel principal bifásico. Chamar ST7735_Main_Reset() após qualquer
+ * ST7735_FillScreen() para forçar o redesenho do fundo estático. */
+void ST7735_Main_Update(float v1, float i1, float p1, float q1, float s1, float fp1,
+                         float v2, float i2, float p2, float q2, float s2, float fp2,
+                         uint32_t uptime_s, uint32_t frame);
+void ST7735_Main_Reset(void);
 
 #endif /* INC_ST7735_H */

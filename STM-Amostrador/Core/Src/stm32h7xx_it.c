@@ -58,6 +58,7 @@
 
 /* USER CODE BEGIN EV */
 extern DMA_HandleTypeDef hdma_adc1;
+extern DMA_HandleTypeDef hdma_adc2;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -204,5 +205,10 @@ void SysTick_Handler(void)
 void DMA2_Stream0_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_adc1);
+}
+
+void DMA2_Stream1_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_adc2);
 }
 /* USER CODE END 1 */

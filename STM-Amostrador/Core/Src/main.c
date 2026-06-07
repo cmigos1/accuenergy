@@ -50,52 +50,57 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+/* Estado completo de uma fase de medição (sensor de tensão + sensor de corrente).
+ * Duas instâncias independentes: fase 1 (ADC1, PA6/PC4) e fase 2 (ADC2, PA7/PC5).
+ * Amostragem bifásica em paralelo — os dois ADCs convertem no mesmo trigger TIM2,
+ * portanto o tempo de aquisição por frame não aumenta com a 2ª fase. */
+typedef struct {
+    uint32_t vRaw[NUM_SAMPLES];          /* contagens ADC pós-deinterleave */
+    uint32_t iRaw[NUM_SAMPLES];
+    float    vFloat[NUM_SAMPLES];        /* trabalho Goertzel (unidades físicas) */
+    float    iFloat[NUM_SAMPLES];
+
+    float    vrms, irms, preal, papar, preati, fp;   /* métricas calculadas */
+    float    thd_v, thd_i;
+    float    harmMagV[HARM_MAX + 1u];
+    float    harmMagI[HARM_MAX + 1u];
+
+    uint32_t adc_mean_v, adc_mean_i;     /* raw para calibração / debug */
+    uint32_t adc_pp_v,   adc_pp_i;
+
+    float    irms_buf[IRMS_AVG_N];       /* média deslizante de Irms (por fase) */
+    uint32_t irms_idx;
+} PhaseData;
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
+DMA_HandleTypeDef hdma_adc2;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef hlpuart1;
 
 /* USER CODE BEGIN PV */
-/* DMA buffer em AXI SRAM (DMA2-acessível) — seção .dma_buffer no linker script */
-static volatile uint32_t adcDmaBuf[NUM_SAMPLES * 2u] __attribute__((section(".dma_buffer"), aligned(32)));
-static volatile uint8_t  samplesReady = 0u;
+/* Buffers DMA em AXI SRAM (DMA2-acessível) — seção .dma_buffer no linker script.
+ * Interleaved [V0 I0 V1 I1 ...]: adcDmaBuf=ADC1 (fase 1), adcDmaBuf2=ADC2 (fase 2). */
+static volatile uint32_t adcDmaBuf [NUM_SAMPLES * 2u] __attribute__((section(".dma_buffer"), aligned(32)));
+static volatile uint32_t adcDmaBuf2[NUM_SAMPLES * 2u] __attribute__((section(".dma_buffer"), aligned(32)));
+static volatile uint8_t  samplesReady  = 0u;   /* ADC1 (fase 1) concluiu o frame */
+static volatile uint8_t  samplesReady2 = 0u;   /* ADC2 (fase 2) concluiu o frame */
 
-/* Canais separados (pós-deinterleave) */
-static uint32_t vRaw[NUM_SAMPLES];
-static uint32_t iRaw[NUM_SAMPLES];
+/* Estado das duas fases (deinterleave, métricas, harmônicos) */
+static PhaseData ph1;   /* fase 1 — ADC1, PA6 (V) / PC4 (I) */
+static PhaseData ph2;   /* fase 2 — ADC2, PA7 (V) / PC5 (I) */
 
-/* Buffers de trabalho para Goertzel (sinais centrados em unidades físicas) */
-static float vFloat[NUM_SAMPLES];
-static float iFloat[NUM_SAMPLES];
-
-/* Últimos valores calculados — compartilhados entre Sampler e display/debug */
-static float last_vrms   = 0.0f;
-static float last_irms   = 0.0f;
-static float last_preal  = 0.0f;
-static float last_papar  = 0.0f;
-static float last_preati = 0.0f;
-static float last_fp     = 0.0f;
 static uint32_t frame_count = 0u;
 
-/* Raw ADC para calibração / debug */
-static uint32_t last_adc_mean_v = 0u;
-static uint32_t last_adc_mean_i = 0u;
-static uint32_t last_adc_pp_v   = 0u;
-static uint32_t last_adc_pp_i   = 0u;
-
-/* Pisos de ruído dinâmicos — inicializados conservadoramente */
-static float g_v_floor = 2.0f;
-static float g_i_floor = 1.2f;
-
-/* Harmônicos e THD */
-static float last_thd_v = 0.0f;
-static float last_thd_i = 0.0f;
-static float harmMagV[HARM_MAX + 1u];
-static float harmMagI[HARM_MAX + 1u];
+/* Pisos de ruído dinâmicos — um par por fase (circuitos independentes) */
+static float g_v_floor  = 2.0f;   /* fase 1 — tensão */
+static float g_i_floor  = 1.2f;   /* fase 1 — corrente */
+static float g_v_floor2 = 2.0f;   /* fase 2 — tensão */
+static float g_i_floor2 = 1.2f;   /* fase 2 — corrente */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,16 +109,18 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_LPUART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-static void Sampler_Deinterleave(void);
-static void Calibrate_Acquire(void);
+static void Sampler_Deinterleave(const volatile uint32_t *src, uint32_t *v, uint32_t *i);
+static void Calibrate_Acquire(uint8_t phase);
+static uint8_t Calibrate_Phase(uint8_t phase, float *out_vrms, float *out_irms);
 static void Calibrate_NoiseFloor(void);
-static void Sampler_ComputeAndSend(void);
+static void Sampler_ComputeAndSend(PhaseData *ph, uint8_t frameType);
 static float Goertzel_Magnitude(float *x, uint32_t N, uint32_t bin);
-static void Harmonics_Compute(void);
-static void Send_HarmonicsFrame(void);
+static void Harmonics_Compute(PhaseData *ph);
+static void Send_HarmonicsFrame(PhaseData *ph, uint8_t frameType);
 static void Debug_SendStatus(void);
 /* USER CODE END PFP */
 
@@ -155,183 +162,223 @@ static void MX_DMA_Init(void)
     __HAL_LINKDMA(&hadc1, DMA_Handle, hdma_adc1);
     HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+
+    /* DMA2 Stream1 — ADC2 → adcDmaBuf2 (fase 2), mesma config do Stream0 */
+    hdma_adc2.Instance                 = DMA2_Stream1;
+    hdma_adc2.Init.Request             = DMA_REQUEST_ADC2;
+    hdma_adc2.Init.Direction           = DMA_PERIPH_TO_MEMORY;
+    hdma_adc2.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_adc2.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_adc2.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+    hdma_adc2.Init.MemDataAlignment    = DMA_MDATAALIGN_WORD;
+    hdma_adc2.Init.Mode                = DMA_NORMAL;
+    hdma_adc2.Init.Priority            = DMA_PRIORITY_HIGH;
+    hdma_adc2.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_adc2) != HAL_OK) Error_Handler();
+    __HAL_LINKDMA(&hadc2, DMA_Handle, hdma_adc2);
+    HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
 }
 
-/* Separa buffer DMA interleaved [V0 I0 V1 I1 ...] → vRaw[] e iRaw[] */
-static void Sampler_Deinterleave(void)
+/* Separa buffer DMA interleaved [V0 I0 V1 I1 ...] → v[] e i[] da fase */
+static void Sampler_Deinterleave(const volatile uint32_t *src, uint32_t *v, uint32_t *i)
 {
-    for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-        vRaw[i] = adcDmaBuf[i * 2u];
-        iRaw[i] = adcDmaBuf[i * 2u + 1u];
+    for (uint32_t k = 0u; k < NUM_SAMPLES; k++) {
+        v[k] = src[k * 2u];
+        i[k] = src[k * 2u + 1u];
     }
 }
 
-/* Aquisição bloqueante — para uso em Calibrate_NoiseFloor */
-static void Calibrate_Acquire(void)
+/* Aquisição bloqueante de uma fase — para uso em Calibrate_NoiseFloor.
+ * phase=1 usa ADC1/adcDmaBuf/ph1, phase=2 usa ADC2/adcDmaBuf2/ph2.
+ * Para e reinicia somente o ADC da fase alvo; o outro permanece parado. */
+static void Calibrate_Acquire(uint8_t phase)
 {
     char _d[160]; int _n;
-    samplesReady = 0u;
 
-    _n = snprintf(_d, sizeof(_d), "# [CAL] A stop\r\n");
+    ADC_HandleTypeDef        *hadc   = (phase == 1u) ? &hadc1  : &hadc2;
+    volatile uint32_t        *buf    = (phase == 1u) ? adcDmaBuf : adcDmaBuf2;
+    volatile uint8_t         *ready  = (phase == 1u) ? &samplesReady : &samplesReady2;
+    PhaseData                *ph     = (phase == 1u) ? &ph1 : &ph2;
+
+    *ready = 0u;
+
+    _n = snprintf(_d, sizeof(_d), "# [CAL] F%u A stop\r\n", (unsigned)phase);
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
 
     HAL_TIM_Base_Stop(&htim2);
-    HAL_ADC_Stop_DMA(&hadc1);
+    HAL_ADC_Stop_DMA(hadc);
+    __HAL_ADC_CLEAR_FLAG(hadc, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
 
-    /* Limpa flags residuais e erros (importante no H7 para evitar travamentos em re-start) */
-    __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
-
-    _n = snprintf(_d, sizeof(_d), "# [CAL] B start\r\n");
+    _n = snprintf(_d, sizeof(_d), "# [CAL] F%u B start\r\n", (unsigned)phase);
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
 
-    HAL_StatusTypeDef st = HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf, NUM_SAMPLES * 2u);
+    HAL_StatusTypeDef st = HAL_ADC_Start_DMA(hadc, (uint32_t *)buf, NUM_SAMPLES * 2u);
 
-    _n = snprintf(_d, sizeof(_d), "# [CAL] C tim st=%d\r\n", (int)st);
+    _n = snprintf(_d, sizeof(_d), "# [CAL] F%u C tim st=%d\r\n", (unsigned)phase, (int)st);
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
 
     HAL_TIM_Base_Start(&htim2);
 
-    _n = snprintf(_d, sizeof(_d), "# [CAL] D t=%lu\r\n", (unsigned long)HAL_GetTick());
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
-
-    _n = snprintf(_d, sizeof(_d), "# [CAL] E pre-loop\r\n");
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
-
     uint32_t t0 = HAL_GetTick();
     uint32_t t_last = t0;
-    while (!samplesReady && (HAL_GetTick() - t0) < 500u) {
+    while (!(*ready) && (HAL_GetTick() - t0) < 500u) {
         uint32_t now = HAL_GetTick();
         if (now - t_last >= 20u) {
             t_last = now;
-            /* Diagnóstico de registros para entender onde o pipeline trava */
-            _n = snprintf(_d, sizeof(_d), "# [CAL] E t=%lu NDTR=%lu ISR=0x%lx\r\n",
+            _n = snprintf(_d, sizeof(_d), "# [CAL] F%u E t=%lu ISR=0x%lx\r\n",
+                          (unsigned)phase,
                           (unsigned long)(now - t0),
-                          (unsigned long)((DMA_Stream_TypeDef *)hdma_adc1.Instance)->NDTR,
-                          (unsigned long)hadc1.Instance->ISR);
+                          (unsigned long)hadc->Instance->ISR);
             HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 10u);
         }
         __NOP();
     }
 
-    _n = snprintf(_d, sizeof(_d), "# [CAL] F rdy=%d t=%lu\r\n",
-                  (int)samplesReady, (unsigned long)(HAL_GetTick() - t0));
+    _n = snprintf(_d, sizeof(_d), "# [CAL] F%u F rdy=%d t=%lu\r\n",
+                  (unsigned)phase, (int)(*ready), (unsigned long)(HAL_GetTick() - t0));
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)_d, (uint16_t)((_n > (int)sizeof(_d)) ? sizeof(_d) : _n), 50u);
 
-    if (samplesReady) {
-        Sampler_Deinterleave();
+    if (*ready) {
+        Sampler_Deinterleave(buf, ph->vRaw, ph->iRaw);
     }
 }
 
-/* Mede piso de ruído com NOISE_CAL_FRAMES aquisições e atualiza g_v_floor / g_i_floor */
-static void Calibrate_NoiseFloor(void)
+/* Mede piso de ruído de uma fase e retorna (max_vrms, max_irms).
+ * Retorna 0 se bem-sucedido, 1 se corrente alta detectada (carga ligada). */
+static uint8_t Calibrate_Phase(uint8_t phase, float *out_vrms, float *out_irms)
 {
-    const char *startMsg = "# [CAL] Iniciando calibracao — desconecte cargas!\r\n";
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)startMsg, (uint16_t)strlen(startMsg), 200u);
-
-    ST7735_FillScreen(ST7735_BLACK);
-    ST7735_DrawString(0, 30, "CALIBRANDO...", ST7735_YELLOW, ST7735_BLACK);
-    ST7735_DrawString(0, 50, "Desconecte",   ST7735_WHITE,  ST7735_BLACK);
-    ST7735_DrawString(0, 62, "as cargas!",   ST7735_WHITE,  ST7735_BLACK);
-
+    PhaseData *ph = (phase == 1u) ? &ph1 : &ph2;
     float max_vrms = 0.0f, max_irms = 0.0f;
 
     for (uint32_t f = 0u; f < NOISE_CAL_FRAMES; f++) {
-        char frameMsg[32];
-        int frameLen = snprintf(frameMsg, sizeof(frameMsg), "# [CAL] Frame %lu/%u\r\n", (unsigned long)(f+1), (unsigned)NOISE_CAL_FRAMES);
+        char frameMsg[40];
+        int  frameLen = snprintf(frameMsg, sizeof(frameMsg),
+                                 "# [CAL] F%u Frame %lu/%u\r\n",
+                                 (unsigned)phase, (unsigned long)(f + 1u), (unsigned)NOISE_CAL_FRAMES);
         HAL_UART_Transmit(&hlpuart1, (uint8_t *)frameMsg, (uint16_t)frameLen, 50u);
 
-        Calibrate_Acquire();
+        Calibrate_Acquire(phase);
 
-        /* Cálculo simplificado para evitar hangs/stack overflow */
-        uint64_t sumV = 0, sumI = 0;
+        uint64_t sumV = 0u, sumI = 0u;
         for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-            sumV += vRaw[i];
-            sumI += iRaw[i];
+            sumV += ph->vRaw[i];
+            sumI += ph->iRaw[i];
         }
         float meanV = (float)sumV / NUM_SAMPLES;
         float meanI = (float)sumI / NUM_SAMPLES;
 
         float sumV2 = 0.0f, sumI2 = 0.0f;
         for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-            float v = (float)vRaw[i] - meanV;
-            float c = (float)iRaw[i] - meanI;
+            float v = (float)ph->vRaw[i] - meanV;
+            float c = (float)ph->iRaw[i] - meanI;
             sumV2 += v * v;
             sumI2 += c * c;
         }
 
-        float vn = sqrtf(sumV2 / NUM_SAMPLES) * CAL_V;
+        float vn  = sqrtf(sumV2 / NUM_SAMPLES) * CAL_V;
         float in_ = sqrtf(sumI2 / NUM_SAMPLES) * CAL_I;
-        
-        if (vn > max_vrms) max_vrms = vn;
+        if (vn  > max_vrms) max_vrms = vn;
         if (in_ > max_irms) max_irms = in_;
     }
 
-    /* Imprime valores medidos para diagnóstico */
-    {
-        char dbg[96];
-        int  dlen = snprintf(dbg, sizeof(dbg),
-            "# [CAL] medido: Irms=%.3fA (max=%.3fA)\r\n", max_irms, max_irms);
-        HAL_UART_Transmit(&hlpuart1, (uint8_t *)dbg, (uint16_t)dlen, 100u);
-    }
+    char dbg[80];
+    int  dlen = snprintf(dbg, sizeof(dbg),
+        "# [CAL] F%u medido: Irms_max=%.3fA\r\n", (unsigned)phase, max_irms);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)dbg, (uint16_t)dlen, 100u);
 
-    /* Tensão: ZMPT101B sempre ligado à rede — usa piso fixo.
-     * Corrente: aborta só se > 5A (carga real ligada, não ruído de CT). */
-    if (max_irms > 5.0f) {
-        const char *warnMsg = "# [CAL] AVISO: corrente alta — carga ligada? Usando pisos anteriores.\r\n";
-        HAL_UART_Transmit(&hlpuart1, (uint8_t *)warnMsg, (uint16_t)strlen(warnMsg), 200u);
-        ST7735_FillScreen(ST7735_BLACK);
-        ST7735_DrawString(0, 30, "CAL ABORTADA", ST7735_RED,   ST7735_BLACK);
-        ST7735_DrawString(0, 50, "Corrente alta",ST7735_WHITE, ST7735_BLACK);
-        ST7735_DrawString(0, 62, "Carga ligada?",ST7735_WHITE, ST7735_BLACK);
+    *out_vrms = max_vrms;
+    *out_irms = max_irms;
+    return (max_irms > 5.0f) ? 1u : 0u;
+}
+
+/* Mede piso de ruído das duas fases e atualiza g_v_floor/g_i_floor (fase 1)
+ * e g_v_floor2/g_i_floor2 (fase 2) com pisos independentes. */
+static void Calibrate_NoiseFloor(void)
+{
+    const char *startMsg = "# [CAL] Iniciando calibracao bifasica — desconecte cargas!\r\n";
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)startMsg, (uint16_t)strlen(startMsg), 200u);
+
+    ST7735_FillScreen(ST7735_BLACK); ST7735_Main_Reset();
+    ST7735_DrawString(0, 20, "CALIBRANDO...", ST7735_YELLOW, ST7735_BLACK);
+    ST7735_DrawString(0, 38, "Desconecte",   ST7735_WHITE,  ST7735_BLACK);
+    ST7735_DrawString(0, 50, "as cargas!",   ST7735_WHITE,  ST7735_BLACK);
+
+    float mv1, mi1, mv2, mi2;
+
+    /* ── Fase 1 ── */
+    if (Calibrate_Phase(1u, &mv1, &mi1)) {
+        const char *w = "# [CAL] AVISO F1: corrente alta — usando pisos anteriores.\r\n";
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)w, (uint16_t)strlen(w), 200u);
+        ST7735_FillScreen(ST7735_BLACK); ST7735_Main_Reset();
+        ST7735_DrawString(0, 20, "CAL ABORTADA", ST7735_RED,   ST7735_BLACK);
+        ST7735_DrawString(0, 38, "F1 I > 5A",   ST7735_WHITE, ST7735_BLACK);
         HAL_Delay(2000u);
         return;
     }
 
-    g_v_floor = V_NOISE_FLOOR_MIN;   /* sempre fixo — sensor de tensão sempre em rede */
-    g_i_floor = max_irms * NOISE_CAL_MARGIN;
-    if (g_i_floor < I_NOISE_FLOOR_MIN) g_i_floor = I_NOISE_FLOOR_MIN;
+    /* ── Fase 2 ── */
+    if (Calibrate_Phase(2u, &mv2, &mi2)) {
+        const char *w = "# [CAL] AVISO F2: corrente alta — usando pisos anteriores.\r\n";
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)w, (uint16_t)strlen(w), 200u);
+        ST7735_FillScreen(ST7735_BLACK); ST7735_Main_Reset();
+        ST7735_DrawString(0, 20, "CAL ABORTADA", ST7735_RED,   ST7735_BLACK);
+        ST7735_DrawString(0, 38, "F2 I > 5A",   ST7735_WHITE, ST7735_BLACK);
+        HAL_Delay(2000u);
+        return;
+    }
 
-    char msg[128];
+    /* Tensão: ZMPT101B em rede — piso fixo para ambas as fases */
+    g_v_floor  = V_NOISE_FLOOR_MIN;
+    g_v_floor2 = V_NOISE_FLOOR_MIN;
+
+    g_i_floor  = mi1 * NOISE_CAL_MARGIN;
+    if (g_i_floor  < I_NOISE_FLOOR_MIN) g_i_floor  = I_NOISE_FLOOR_MIN;
+
+    g_i_floor2 = mi2 * NOISE_CAL_MARGIN;
+    if (g_i_floor2 < I_NOISE_FLOOR_MIN) g_i_floor2 = I_NOISE_FLOOR_MIN;
+
+    char msg[160];
     int  len = snprintf(msg, sizeof(msg),
-        "# [CAL] OK: Vfloor=%ld.%02ldV Ifloor=%ld.%04ldA (margem x%d.%d)\r\n",
-        (long)g_v_floor,  labs((long)(g_v_floor  * 100.0f)   % 100),
+        "# [CAL] OK: F1 Ifloor=%ld.%04ldA | F2 Ifloor=%ld.%04ldA\r\n",
         (long)g_i_floor,  labs((long)(g_i_floor  * 10000.0f) % 10000),
-        (int)NOISE_CAL_MARGIN, (int)((NOISE_CAL_MARGIN * 10.0f)) % 10);
+        (long)g_i_floor2, labs((long)(g_i_floor2 * 10000.0f) % 10000));
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, (uint16_t)len, 200u);
 
     char lcd1[24], lcd2[24];
-    snprintf(lcd1, sizeof(lcd1), "Vfloor:%ld.%02ldV",
-             (long)g_v_floor, labs((long)(g_v_floor * 100.0f) % 100));
-    snprintf(lcd2, sizeof(lcd2), "Ifloor:%ld.%04ldA",
-             (long)g_i_floor, labs((long)(g_i_floor * 10000.0f) % 10000));
-    ST7735_FillScreen(ST7735_BLACK);
-    ST7735_DrawString(0, 30, "CAL OK",  ST7735_GREEN, ST7735_BLACK);
-    ST7735_DrawString(0, 50, lcd1,      ST7735_CYAN,  ST7735_BLACK);
-    ST7735_DrawString(0, 62, lcd2,      ST7735_CYAN,  ST7735_BLACK);
+    snprintf(lcd1, sizeof(lcd1), "F1:%ld.%04ldA",
+             (long)g_i_floor,  labs((long)(g_i_floor  * 10000.0f) % 10000));
+    snprintf(lcd2, sizeof(lcd2), "F2:%ld.%04ldA",
+             (long)g_i_floor2, labs((long)(g_i_floor2 * 10000.0f) % 10000));
+    ST7735_FillScreen(ST7735_BLACK); ST7735_Main_Reset();
+    ST7735_DrawString(0, 20, "CAL OK",  ST7735_GREEN, ST7735_BLACK);
+    ST7735_DrawString(0, 38, lcd1,      ST7735_CYAN,  ST7735_BLACK);
+    ST7735_DrawString(0, 50, lcd2,      ST7735_CYAN,  ST7735_BLACK);
     HAL_Delay(2000u);
 }
 
-/* Cálculo Vrms, Irms, Preal, S, Q, FP e transmissão do frame 0x01 */
-static void Sampler_ComputeAndSend(void)
+/* Cálculo Vrms, Irms, Preal, S, Q, FP e transmissão do frame de potência.
+ * frameType = 0x01 (fase 1) ou 0x03 (fase 2). Opera sobre os buffers de 'ph'. */
+static void Sampler_ComputeAndSend(PhaseData *ph, uint8_t frameType)
 {
     double   sumV = 0.0, sumI = 0.0;
     uint32_t vmax = 0u,  vmin = UINT32_MAX;
     uint32_t imax = 0u,  imin = UINT32_MAX;
     for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-        sumV += vRaw[i];
-        sumI += iRaw[i];
-        if (vRaw[i] > vmax) vmax = vRaw[i];
-        if (vRaw[i] < vmin) vmin = vRaw[i];
-        if (iRaw[i] > imax) imax = iRaw[i];
-        if (iRaw[i] < imin) imin = iRaw[i];
+        sumV += ph->vRaw[i];
+        sumI += ph->iRaw[i];
+        if (ph->vRaw[i] > vmax) vmax = ph->vRaw[i];
+        if (ph->vRaw[i] < vmin) vmin = ph->vRaw[i];
+        if (ph->iRaw[i] > imax) imax = ph->iRaw[i];
+        if (ph->iRaw[i] < imin) imin = ph->iRaw[i];
     }
     double meanV = sumV / NUM_SAMPLES;
     double meanI = sumI / NUM_SAMPLES;
 
     double sumV2 = 0.0, sumI2 = 0.0, sumVI = 0.0;
     for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-        double v  = (double)vRaw[i] - meanV;
-        double ci = (double)iRaw[i] - meanI;
+        double v  = (double)ph->vRaw[i] - meanV;
+        double ci = (double)ph->iRaw[i] - meanI;
         sumV2 += v  * v;
         sumI2 += ci * ci;
         sumVI += v  * ci;
@@ -341,16 +388,17 @@ static void Sampler_ComputeAndSend(void)
     float Irms  = (float)(sqrt(sumI2 / NUM_SAMPLES)) * CAL_I;
     float Preal = (float)(sumVI / NUM_SAMPLES) * CAL_V * CAL_I * SCT013_SIGN;
 
-    static float    irms_buf[IRMS_AVG_N] = {0.0f};
-    static uint32_t irms_idx = 0u;
-    irms_buf[irms_idx] = Irms;
-    irms_idx = (irms_idx + 1u) % IRMS_AVG_N;
+    ph->irms_buf[ph->irms_idx] = Irms;
+    ph->irms_idx = (ph->irms_idx + 1u) % IRMS_AVG_N;
     float irms_sum = 0.0f;
-    for (uint32_t k = 0u; k < IRMS_AVG_N; k++) irms_sum += irms_buf[k];
+    for (uint32_t k = 0u; k < IRMS_AVG_N; k++) irms_sum += ph->irms_buf[k];
     Irms = irms_sum / (float)IRMS_AVG_N;
 
-    if (Vrms < g_v_floor) { Vrms = 0.0f; Preal = 0.0f; }
-    if (Irms < g_i_floor) { Irms = 0.0f; Preal = 0.0f; }
+    /* Pisos independentes por fase — frameType 0x01=F1, 0x03=F2 */
+    float vfloor = (frameType == 0x01u) ? g_v_floor  : g_v_floor2;
+    float ifloor = (frameType == 0x01u) ? g_i_floor  : g_i_floor2;
+    if (Vrms < vfloor) { Vrms = 0.0f; Preal = 0.0f; }
+    if (Irms < ifloor) { Irms = 0.0f; Preal = 0.0f; }
 
     float S  = Vrms * Irms;
     float Q2 = S * S - Preal * Preal;
@@ -359,20 +407,19 @@ static void Sampler_ComputeAndSend(void)
     if (FP >  1.0f) FP =  1.0f;
     if (FP < -1.0f) FP = -1.0f;
 
-    last_vrms       = Vrms;
-    last_irms       = Irms;
-    last_preal      = Preal;
-    last_papar      = S;
-    last_preati     = Q;
-    last_fp         = FP;
-    last_adc_mean_v = (uint32_t)meanV;
-    last_adc_mean_i = (uint32_t)meanI;
-    last_adc_pp_v   = vmax - vmin;
-    last_adc_pp_i   = imax - imin;
-    frame_count++;
+    ph->vrms       = Vrms;
+    ph->irms       = Irms;
+    ph->preal      = Preal;
+    ph->papar      = S;
+    ph->preati     = Q;
+    ph->fp         = FP;
+    ph->adc_mean_v = (uint32_t)meanV;
+    ph->adc_mean_i = (uint32_t)meanI;
+    ph->adc_pp_v   = vmax - vmin;
+    ph->adc_pp_i   = imax - imin;
 
     uint8_t hdr[29];
-    hdr[0] = 0xAB; hdr[1] = 0xCD; hdr[2] = 0x01;
+    hdr[0] = 0xAB; hdr[1] = 0xCD; hdr[2] = frameType;
     memcpy(&hdr[3],  &Vrms,  4);
     memcpy(&hdr[7],  &Irms,  4);
     memcpy(&hdr[11], &FP,    4);
@@ -382,16 +429,16 @@ static void Sampler_ComputeAndSend(void)
     hdr[27] = (uint8_t)IDF_N;
     hdr[28] = (uint8_t)IDF_STEP;
 
-    int16_t samples[IDF_N * 2u];
+    int32_t samples[IDF_N * 2u];
     for (uint32_t i = 0u; i < IDF_N; i++) {
         uint32_t idx     = i * IDF_STEP;
-        samples[i*2u]    = (int16_t)((double)vRaw[idx] - meanV);
-        samples[i*2u+1u] = (int16_t)((double)iRaw[idx] - meanI);
+        samples[i*2u]    = (int32_t)((double)ph->vRaw[idx] - meanV);
+        samples[i*2u+1u] = (int32_t)((double)ph->iRaw[idx] - meanI);
     }
 
     uint8_t footer[2] = {0xEF, 0xFE};
     HAL_UART_Transmit(&hlpuart1, hdr,                29u,          50u);
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)samples, IDF_N * 4u, 200u);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)samples, IDF_N * 8u, 200u);
     HAL_UART_Transmit(&hlpuart1, footer,              2u,           10u);
 }
 
@@ -411,50 +458,51 @@ static float Goertzel_Magnitude(float *x, uint32_t N, uint32_t bin)
     return 2.0f * sqrtf(re * re + im * im) / (float)N;
 }
 
-/* Calcula magnitudes dos harmônicos 1..HARM_MAX e THD para V e I */
-static void Harmonics_Compute(void)
+/* Calcula magnitudes dos harmônicos 1..HARM_MAX e THD para V e I da fase 'ph' */
+static void Harmonics_Compute(PhaseData *ph)
 {
     double sumV = 0.0, sumI = 0.0;
     for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-        sumV += vRaw[i];
-        sumI += iRaw[i];
+        sumV += ph->vRaw[i];
+        sumI += ph->iRaw[i];
     }
     float meanV = (float)(sumV / NUM_SAMPLES);
     float meanI = (float)(sumI / NUM_SAMPLES);
 
     for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
-        vFloat[i] = ((float)vRaw[i] - meanV) * CAL_V;
-        iFloat[i] = ((float)iRaw[i] - meanI) * CAL_I;
+        ph->vFloat[i] = ((float)ph->vRaw[i] - meanV) * CAL_V;
+        ph->iFloat[i] = ((float)ph->iRaw[i] - meanI) * CAL_I;
     }
 
-    harmMagV[0u] = 0.0f;
-    harmMagI[0u] = 0.0f;
+    ph->harmMagV[0u] = 0.0f;
+    ph->harmMagI[0u] = 0.0f;
     for (uint32_t h = 1u; h <= HARM_MAX; h++) {
-        harmMagV[h] = Goertzel_Magnitude(vFloat, NUM_SAMPLES, h * F0_BIN);
-        harmMagI[h] = Goertzel_Magnitude(iFloat, NUM_SAMPLES, h * F0_BIN);
+        ph->harmMagV[h] = Goertzel_Magnitude(ph->vFloat, NUM_SAMPLES, h * F0_BIN);
+        ph->harmMagI[h] = Goertzel_Magnitude(ph->iFloat, NUM_SAMPLES, h * F0_BIN);
     }
 
     float sumV2 = 0.0f, sumI2 = 0.0f;
     for (uint32_t h = 2u; h <= HARM_MAX; h++) {
-        sumV2 += harmMagV[h] * harmMagV[h];
-        sumI2 += harmMagI[h] * harmMagI[h];
+        sumV2 += ph->harmMagV[h] * ph->harmMagV[h];
+        sumI2 += ph->harmMagI[h] * ph->harmMagI[h];
     }
-    last_thd_v = (harmMagV[1u] > 0.001f) ? sqrtf(sumV2) / harmMagV[1u] : 0.0f;
-    last_thd_i = (harmMagI[1u] > 0.001f) ? sqrtf(sumI2) / harmMagI[1u] : 0.0f;
+    ph->thd_v = (ph->harmMagV[1u] > 0.001f) ? sqrtf(sumV2) / ph->harmMagV[1u] : 0.0f;
+    ph->thd_i = (ph->harmMagI[1u] > 0.001f) ? sqrtf(sumI2) / ph->harmMagI[1u] : 0.0f;
 }
 
-/* Frame tipo 0x02: [AB CD 02] THD_V THD_I HarmV[1..50] HarmI[1..50] [EF FE]
+/* Frame de harmônicos: [AB CD TT] THD_V THD_I HarmV[1..50] HarmI[1..50] [EF FE]
+ * frameType = 0x02 (fase 1) ou 0x04 (fase 2).
  * Total: 3 + 4 + 4 + 200 + 200 + 2 = 413 bytes */
-static void Send_HarmonicsFrame(void)
+static void Send_HarmonicsFrame(PhaseData *ph, uint8_t frameType)
 {
-    uint8_t hdr[3]    = {0xAB, 0xCD, 0x02};
+    uint8_t hdr[3]    = {0xAB, 0xCD, frameType};
     uint8_t footer[2] = {0xEF, 0xFE};
-    HAL_UART_Transmit(&hlpuart1, hdr,                           3u,             10u);
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&last_thd_v,        4u,             10u);
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&last_thd_i,        4u,             10u);
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&harmMagV[1u], HARM_MAX * 4u, 200u);
-    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&harmMagI[1u], HARM_MAX * 4u, 200u);
-    HAL_UART_Transmit(&hlpuart1, footer,                         2u,             10u);
+    HAL_UART_Transmit(&hlpuart1, hdr,                          3u,             10u);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&ph->thd_v,        4u,             10u);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&ph->thd_i,        4u,             10u);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&ph->harmMagV[1u], HARM_MAX * 4u, 200u);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)&ph->harmMagI[1u], HARM_MAX * 4u, 200u);
+    HAL_UART_Transmit(&hlpuart1, footer,                        2u,             10u);
 }
 
 /* Botão KEY (PC13, ativo ALTO) — envia status via UART */
@@ -467,10 +515,10 @@ static void Debug_SendStatus(void)
     len = snprintf(msg, sizeof(msg),
         "# [STM32 DEBUG] up:%lus frm:%lu | V:%ld.%02ld I:%ld.%04ld P:%ld.%02ld FP:%ld.%03ld\r\n",
         (unsigned long)uptime_s, (unsigned long)frame_count,
-        (long)last_vrms,  (long)(last_vrms  * 100.0f)   % 100,
-        (long)last_irms,  (long)(last_irms  * 10000.0f) % 10000,
-        (long)last_preal, labs((long)(last_preal * 100.0f)  % 100),
-        (long)last_fp,    labs((long)(last_fp    * 1000.0f) % 1000));
+        (long)ph1.vrms,  (long)(ph1.vrms  * 100.0f)   % 100,
+        (long)ph1.irms,  (long)(ph1.irms  * 10000.0f) % 10000,
+        (long)ph1.preal, labs((long)(ph1.preal * 100.0f)  % 100),
+        (long)ph1.fp,    labs((long)(ph1.fp    * 1000.0f) % 1000));
 
     HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, (uint16_t)len, 200u);
     
@@ -481,12 +529,18 @@ static void Debug_SendStatus(void)
 /* DMA completo — para timer, invalida D-cache, sinaliza main loop */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
+    /* ADC1 e ADC2 disparam no mesmo trigger TIM2 e terminam o frame juntos.
+     * Parar o timer no callback do ADC1 não perde dados do ADC2: a última
+     * transferência DMA da fase 2 vem do mesmo trigger já consumido. */
     if (hadc == &hadc1) {
         HAL_TIM_Base_Stop(&htim2);
         /* D-cache desligada neste projeto — SCB_InvalidateDCache_by_Addr é no-op
          * e UNPREDICTABLE quando cache está off (ARM TRM): removida para evitar fault */
         __DSB();
         samplesReady = 1u;
+    } else if (hadc == &hadc2) {
+        __DSB();
+        samplesReady2 = 1u;
     }
 }
 
@@ -532,6 +586,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
+  MX_ADC2_Init();
   MX_TIM2_Init();
   MX_LPUART1_UART_Init();
   /* USER CODE BEGIN 2 */
@@ -540,29 +595,36 @@ int main(void)
   DWT->CYCCNT = 0u;
   DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
 
-  /* Calibração de offset do ADC antes do primeiro uso */
+  /* Calibração de offset dos dois ADCs antes do primeiro uso */
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED);
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED);
 
   /* Display ST7735 — inicializa e mostra tela inicial */
   ST7735_Init();
-  ST7735_Debug_Update(0.0f, 0.0f, 0.0f, 0.0f, 0u, 0u, 0u, 0u, 0u);
+  ST7735_Main_Update(0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+                     0.0f,0.0f,0.0f,0.0f,0.0f,0.0f, 0u, 0u);
 
   uint32_t btnLastTick = 0u;
 
-  const char *bootMsg = "# [STM32 BOOT] WeAct H743 OK | ADC1 CH3+CH4 DMA | TIM2 15360Hz | LPUART1 460800\r\n";
+  const char *bootMsg = "# [STM32 BOOT] WeAct H743 OK | ADC1 CH3+CH4 + ADC2 CH7+CH8 (bifasico) DMA | TIM2 15360Hz | LPUART1 460800\r\n";
   HAL_UART_Transmit(&hlpuart1, (uint8_t *)bootMsg, (uint16_t)strlen(bootMsg), 200);
 
-  /* Zera adcDmaBuf: seção NOLOAD não é inicializada pelo startup — garbage causaria
+  /* Zera buffers DMA: seção NOLOAD não é inicializada pelo startup — garbage causaria
    * falsa detecção de sinal alto na calibração */
-  memset((void *)adcDmaBuf, 0, sizeof(adcDmaBuf));
+  memset((void *)adcDmaBuf,  0, sizeof(adcDmaBuf));
+  memset((void *)adcDmaBuf2, 0, sizeof(adcDmaBuf2));
 
   /* Calibração automática do piso de ruído — certifique-se de não ter cargas conectadas */
   Calibrate_NoiseFloor();
 
-  /* Inicia primeira aquisição DMA */
+  /* Inicia primeira aquisição DMA — ADC2 e ADC1 armados antes do timer para
+   * capturarem o mesmo primeiro trigger (fases alinhadas) */
   HAL_ADC_Stop_DMA(&hadc1);
+  HAL_ADC_Stop_DMA(&hadc2);
   __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf, NUM_SAMPLES * 2u);
+  __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
+  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adcDmaBuf2, NUM_SAMPLES * 2u);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf,  NUM_SAMPLES * 2u);
   HAL_TIM_Base_Start(&htim2);
 
   /* USER CODE END 2 */
@@ -574,22 +636,31 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (samplesReady) {
-        samplesReady = 0u;
-        Sampler_Deinterleave();
-        Sampler_ComputeAndSend();
+    /* Espera as duas fases (ADC1 + ADC2) — ambas terminam no mesmo trigger */
+    if (samplesReady && samplesReady2) {
+        samplesReady  = 0u;
+        samplesReady2 = 0u;
+        Sampler_Deinterleave(adcDmaBuf,  ph1.vRaw, ph1.iRaw);
+        Sampler_Deinterleave(adcDmaBuf2, ph2.vRaw, ph2.iRaw);
+        Sampler_ComputeAndSend(&ph1, 0x01u);   /* fase 1 */
+        Sampler_ComputeAndSend(&ph2, 0x03u);   /* fase 2 */
+        frame_count++;
         if ((frame_count % HARM_FRAME_DIV) == 0u) {
-            Harmonics_Compute();
-            Send_HarmonicsFrame();
+            Harmonics_Compute(&ph1);
+            Send_HarmonicsFrame(&ph1, 0x02u);  /* harmônicos fase 1 */
+            Harmonics_Compute(&ph2);
+            Send_HarmonicsFrame(&ph2, 0x04u);  /* harmônicos fase 2 */
         }
-        ST7735_Debug_Update(last_vrms, last_irms, last_preal, last_fp,
-                            HAL_GetTick() / 1000u,
-                            last_adc_mean_v, last_adc_mean_i,
-                            last_adc_pp_v,   last_adc_pp_i);
-        /* Reinicia aquisição para o próximo frame */
+        ST7735_Main_Update(ph1.vrms, ph1.irms, ph1.preal, ph1.preati, ph1.papar, ph1.fp,
+                           ph2.vrms, ph2.irms, ph2.preal, ph2.preati, ph2.papar, ph2.fp,
+                           HAL_GetTick() / 1000u, frame_count);
+        /* Reinicia aquisição das duas fases para o próximo frame */
         HAL_ADC_Stop_DMA(&hadc1);
+        HAL_ADC_Stop_DMA(&hadc2);
         __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf, NUM_SAMPLES * 2u);
+        __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
+        HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adcDmaBuf2, NUM_SAMPLES * 2u);
+        HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf,  NUM_SAMPLES * 2u);
         HAL_TIM_Base_Start(&htim2);
     }
 
@@ -600,11 +671,18 @@ int main(void)
             btnLastTick = HAL_GetTick();
             HAL_TIM_Base_Stop(&htim2);
             HAL_ADC_Stop_DMA(&hadc1);
+            HAL_ADC_Stop_DMA(&hadc2);
             Calibrate_NoiseFloor();
             Debug_SendStatus();
-            /* Reinicia aquisição após calibração */
+            /* Reinicia aquisição das duas fases após calibração */
             HAL_ADC_Stop_DMA(&hadc1);
-            HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf, NUM_SAMPLES * 2u);
+            HAL_ADC_Stop_DMA(&hadc2);
+            __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
+            __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
+            samplesReady  = 0u;
+            samplesReady2 = 0u;
+            HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adcDmaBuf2, NUM_SAMPLES * 2u);
+            HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf,  NUM_SAMPLES * 2u);
             HAL_TIM_Base_Start(&htim2);
         }
     }
@@ -671,27 +749,14 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_ADC1_Init(void)
 {
 
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
 
   ADC_MultiModeTypeDef multimode = {0};
   ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN ADC1_Init 1 */
 
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Common config
-  */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV4;        /* 80MHz/4=20MHz (Mais tempo para DMA respirar) */
   hadc1.Init.Resolution            = ADC_RESOLUTION_16B;
@@ -752,21 +817,69 @@ static void MX_ADC1_Init(void)
 
 }
 
+/* ADC2 — fase 2 da análise bifásica. Mesma config do ADC1, disparado pelo
+ * mesmo TIM2_TRGO (conversão paralela → não aumenta o tempo de amostragem).
+ * Canais: CH7=PA7 (tensão V2, Rank 1), CH8=PC5 (corrente I2, Rank 2). */
+static void MX_ADC2_Init(void)
+{
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV4;
+  hadc2.Init.Resolution            = ADC_RESOLUTION_16B;
+  hadc2.Init.ScanConvMode          = ADC_SCAN_ENABLE;
+  hadc2.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.LowPowerAutoWait      = DISABLE;
+  hadc2.Init.ContinuousConvMode    = DISABLE;
+  hadc2.Init.NbrOfConversion       = 2;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConv      = ADC_EXTERNALTRIG_T2_TRGO;
+  hadc2.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc2.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
+  hadc2.Init.Overrun               = ADC_OVR_DATA_OVERWRITTEN;
+  hadc2.Init.LeftBitShift          = ADC_LEFTBITSHIFT_NONE;
+  hadc2.Init.OversamplingMode      = DISABLE;
+  hadc2.Init.Oversampling.Ratio    = 1;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** CH7 = PA7 — tensão fase 2 (Rank 1)
+  */
+  sConfig.Channel      = ADC_CHANNEL_7;
+  sConfig.Rank         = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;
+  sConfig.SingleDiff   = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset       = 0;
+  sConfig.OffsetSignedSaturation = DISABLE;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** CH8 = PC5 — corrente fase 2 (Rank 2)
+  */
+  sConfig.Channel      = ADC_CHANNEL_8;
+  sConfig.Rank         = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
 /**
   * @brief LPUART1 Initialization Function
   * @param None
   * @retval None
   */
+
+// Pinos LPUART1: PA9 (TX), PA10 (RX)
+
 static void MX_LPUART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN LPUART1_Init 0 */
-
-  /* USER CODE END LPUART1_Init 0 */
-
-  /* USER CODE BEGIN LPUART1_Init 1 */
-
-  /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
   hlpuart1.Init.BaudRate = 460800;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -794,24 +907,11 @@ static void MX_LPUART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN LPUART1_Init 2 */
-
-  /* USER CODE END LPUART1_Init 2 */
 
 }
 
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_GPIO_Init(void)
 {
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
@@ -825,24 +925,13 @@ static void MX_GPIO_Init(void)
 
   /* GPIOE necessário para o display ST7735 (PE10–PE14) */
   __HAL_RCC_GPIOE_CLK_ENABLE();
-  /* USER CODE END MX_GPIO_Init_2 */
 }
-
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
- /* MPU Configuration */
 
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
-
-  /* Disables the MPU */
   HAL_MPU_Disable();
 
-  /** Initializes and configures the Region and the memory to be protected
-  */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -856,15 +945,10 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-  /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */

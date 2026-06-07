@@ -7,10 +7,16 @@
  *
  * USB Serial (UART0) → PC @ 460800 baud
  *
- * Frames do STM32 (protocolo binário):
- *   0x01 Power : AB CD 01 + 6×f32 + 128×2×i16 + EF FE = 543 bytes @ ~15 Hz
- *   0x02 Harm  : AB CD 02 + 2×f32 + 100×f32  + EF FE = 413 bytes @ ~1.5 Hz
- *   '#' lines  : debug ASCII, passadas integralmente ao PC
+ * Frames do STM32 (protocolo binário) — análise bifásica:
+ *   0x01 Power F1 : AB CD 01 + 6×f32 + 128×2×i16 + EF FE = 543 bytes @ ~15 Hz
+ *   0x02 Harm  F1 : AB CD 02 + 2×f32 + 100×f32  + EF FE = 413 bytes @ ~1.5 Hz
+ *   0x03 Power F2 : AB CD 03 + (mesmo layout 0x01)       = 543 bytes @ ~15 Hz
+ *   0x04 Harm  F2 : AB CD 04 + (mesmo layout 0x02)       = 413 bytes @ ~1.5 Hz
+ *   '#' lines     : debug ASCII, passadas integralmente ao PC
+ *
+ * A ponte é transparente (byte-a-byte), então os 4 tipos passam sem alteração
+ * de lógica — só foram ampliados os buffers para o rajada bifásica (até ~1.9 KB
+ * por janela: 0x01+0x03+0x02+0x04).
  *
  * LED onboard (GPIO2) pisca ao receber dados do STM32.
  */
@@ -21,12 +27,12 @@ static constexpr uint32_t STM32_BAUD = 460800;
 static constexpr uint32_t PC_BAUD    = 460800;
 static constexpr int      UART2_RX   = 16;
 static constexpr int      UART2_TX   = 17;
-static constexpr int      RX_BUF_SZ  = 2048;  // ≥2 max frames (543 bytes cada)
-static constexpr int      TX_BUF_SZ  = 2048;
+static constexpr int      RX_BUF_SZ  = 4096;  // bifásico: rajada até ~1.9 KB/janela
+static constexpr int      TX_BUF_SZ  = 4096;
 static constexpr uint8_t  LED_PIN    = 2;
 static constexpr uint32_t LED_PERIOD = 60;     // ms — pisca ~16 Hz no pico
 
-static uint8_t  xBuf[1024];
+static uint8_t  xBuf[2048];
 static uint32_t lastLedToggle = 0;
 static bool     ledState      = false;
 static uint32_t bytesTotal    = 0;
@@ -45,7 +51,7 @@ void setup() {
 
     // Aguarda USB Serial estabilizar
     delay(100);
-    Serial.println("# [ESP32] AccuEnergy bridge OK — aguardando STM32...");
+    Serial.println("# [ESP32] AccuEnergy bridge OK (bifasico 0x01-0x04) — aguardando STM32...");
 }
 
 void loop() {

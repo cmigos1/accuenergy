@@ -286,80 +286,194 @@ void ST7735_DrawString(uint8_t x, uint8_t y, const char *s, uint16_t fg, uint16_
     }
 }
 
-/* ── Formata float sem %f (newlib-nano não suporta %f por defeito) ──────── */
-/* Equivalente a %6.1f (ex: " 127.3") */
-static void fmt_f1(char *out, float v)
+/* ── Retângulo preenchido ───────────────────────────────────────────────── */
+static void fill_rect(uint8_t x0, uint8_t y0, uint8_t w, uint8_t h, uint16_t color)
 {
-    int     neg = (v < 0.0f);
-    float   av  = neg ? -v : v;
-    int32_t iv  = (int32_t)(av * 10.0f + 0.5f);
-    char    tmp[12];
-    snprintf(tmp, sizeof(tmp), "%s%ld.%ld", neg ? "-" : "", (long)(iv / 10), (long)(iv % 10));
-    snprintf(out, 8, "%6s", tmp);
+    if (x0 >= ST7735_W || y0 >= ST7735_H || w == 0u || h == 0u) return;
+    if ((uint16_t)x0 + w > ST7735_W) w = (uint8_t)(ST7735_W - x0);
+    if ((uint16_t)y0 + h > ST7735_H) h = (uint8_t)(ST7735_H - y0);
+    set_addr_window(x0, y0, (uint8_t)(x0 + w - 1u), (uint8_t)(y0 + h - 1u));
+    DC_H(); CS_L();
+    uint8_t hi = (uint8_t)(color >> 8), lo = (uint8_t)(color & 0xFFu);
+    for (uint32_t i = 0u; i < (uint32_t)w * h; i++) {
+        spi_write_byte(hi); spi_write_byte(lo);
+    }
+    CS_H();
 }
 
-/* Equivalente a %6.3f (ex: "  5.234") */
-static void fmt_f3(char *out, float v)
+/* ── Caractere 1× nativo (5×7 px + 1 col gap à direita = 6×7 px) ───────── */
+static void draw_char1x(uint8_t x, uint8_t y, char c, uint16_t fg, uint16_t bg)
 {
-    int     neg = (v < 0.0f);
-    float   av  = neg ? -v : v;
-    int32_t iv  = (int32_t)(av * 1000.0f + 0.5f);
-    char    tmp[12];
-    snprintf(tmp, sizeof(tmp), "%s%ld.%03ld", neg ? "-" : "", (long)(iv / 1000), (long)(iv % 1000));
-    snprintf(out, 8, "%6s", tmp);
+    if ((uint8_t)c < 0x20u || (uint8_t)c > 0x7Eu) c = '?';
+    const uint8_t *glyph = font5x7[(uint8_t)(c - 0x20u)];
+    /* Janela de 6×7: 5 colunas de glifo + 1 coluna de espaço */
+    set_addr_window(x, y, (uint8_t)(x + 5u), (uint8_t)(y + 6u));
+    DC_H(); CS_L();
+    uint8_t fhi = (uint8_t)(fg >> 8), flo = (uint8_t)(fg & 0xFFu);
+    uint8_t bhi = (uint8_t)(bg >> 8), blo = (uint8_t)(bg & 0xFFu);
+    for (uint8_t row = 0u; row < 7u; row++) {
+        for (uint8_t col = 0u; col < 5u; col++) {
+            if (glyph[col] & (1u << row)) {
+                spi_write_byte(fhi); spi_write_byte(flo);
+            } else {
+                spi_write_byte(bhi); spi_write_byte(blo);
+            }
+        }
+        /* Coluna de espaço */
+        spi_write_byte(bhi); spi_write_byte(blo);
+    }
+    CS_H();
 }
 
-/* ── Atualiza tela de debug ─────────────────────────────────────────────── */
-/* Layout portrait 80×160, stride 14px (11 linhas cabem em 154px).
- * Colunas: label 1 char (x=0), valor 6 chars (x=11..76). */
-void ST7735_Debug_Update(float vrms, float irms, float preal, float fp, uint32_t uptime_s,
-                          uint32_t adc_mean_v, uint32_t adc_mean_i,
-                          uint32_t adc_pp_v,   uint32_t adc_pp_i)
+/* ── String em fonte 1× (stride 6 px) ──────────────────────────────────── */
+void ST7735_DrawString1x(uint8_t x, uint8_t y, const char *s, uint16_t fg, uint16_t bg)
 {
-    static uint32_t s_frame = 0u;
-    s_frame++;
-    char buf[10];
+    while (*s && (uint16_t)x + 6u <= ST7735_W) {
+        draw_char1x(x, y, *s++, fg, bg);
+        x = (uint8_t)(x + 6u);
+    }
+}
 
-    ST7735_DrawString(0,   0, "=STM32=", ST7735_CYAN,   ST7735_BLACK);
+/* ── Formatador 5 chars sem %f ──────────────────────────────────────────── */
+/* Produz exatamente 5 chars right-justified em out[6]. d = casas decimais (0-3). */
+static void fmt5(char *out, float v, uint8_t d)
+{
+    if (v != v || v > 99999.0f || v < -9999.0f) {
+        out[0]='-'; out[1]='-'; out[2]='-'; out[3]='-'; out[4]='-'; out[5]='\0';
+        return;
+    }
+    uint8_t neg = (v < 0.0f) ? 1u : 0u;
+    float   av  = neg ? -v : v;
+    uint32_t scale = 1u;
+    for (uint8_t i = 0u; i < d; i++) scale *= 10u;
+    uint32_t iv = (uint32_t)(av * (float)scale + 0.5f);
+    uint32_t ip = iv / scale;
+    uint32_t dp_ = iv % scale;
+    char tmp[12];
+    uint8_t len;
+    if (d == 0u)
+        len = (uint8_t)snprintf(tmp, sizeof(tmp), "%s%lu",     neg?"-":"", (unsigned long)ip);
+    else if (d == 1u)
+        len = (uint8_t)snprintf(tmp, sizeof(tmp), "%s%lu.%lu", neg?"-":"", (unsigned long)ip, (unsigned long)dp_);
+    else if (d == 2u)
+        len = (uint8_t)snprintf(tmp, sizeof(tmp), "%s%lu.%02lu",neg?"-":"", (unsigned long)ip, (unsigned long)dp_);
+    else
+        len = (uint8_t)snprintf(tmp, sizeof(tmp), "%s%lu.%03lu",neg?"-":"", (unsigned long)ip, (unsigned long)dp_);
+    if (len >= 5u) {
+        for (uint8_t i = 0u; i < 5u; i++) out[i] = tmp[i + (len - 5u)];
+    } else {
+        uint8_t pad = (uint8_t)(5u - len);
+        for (uint8_t i = 0u; i < pad; i++) out[i] = ' ';
+        for (uint8_t i = 0u; i < len; i++) out[pad + i] = tmp[i];
+    }
+    out[5] = '\0';
+}
 
-    ST7735_DrawString(0,  14, "V", ST7735_GRAY, ST7735_BLACK);
-    fmt_f1(buf, vrms);
-    ST7735_DrawString(11, 14, buf, ST7735_YELLOW, ST7735_BLACK);
+/* Auto-range decimal: tensão, corrente, potência, fator de potência */
+static void fmtV (char *o, float v) { fmt5(o, v, 1u); }
+static void fmtI (char *o, float v) { fmt5(o, v, v < 10.0f ? 3u : v < 100.0f ? 2u : 1u); }
+static void fmtW (char *o, float v) { fmt5(o, v, v < 100.0f ? 1u : 0u); }
+static void fmtFP(char *o, float v) { fmt5(o, v < 0.0f ? -v : v, 3u); }
 
-    ST7735_DrawString(0,  28, "I", ST7735_GRAY, ST7735_BLACK);
-    fmt_f3(buf, irms);
-    ST7735_DrawString(11, 28, buf, ST7735_YELLOW, ST7735_BLACK);
+/* ── Barra horizontal FP ────────────────────────────────────────────────── */
+/* x=posição, y=topo, w=largura total, h=altura, val em [0,1], fg=cheio, bg=vazio */
+static void draw_bar(uint8_t x, uint8_t y, uint8_t w, uint8_t h,
+                     float val, uint16_t fg, uint16_t bg)
+{
+    uint8_t filled = (val > 0.0f && val <= 1.0f)
+                     ? (uint8_t)(val * (float)w + 0.5f) : 0u;
+    if (filled > w) filled = w;
+    if (filled > 0u) fill_rect(x, y, filled, h, fg);
+    if (filled < w)  fill_rect((uint8_t)(x + filled), y, (uint8_t)(w - filled), h, bg);
+}
 
-    ST7735_DrawString(0,  42, "P", ST7735_GRAY, ST7735_BLACK);
-    fmt_f1(buf, preal);
-    ST7735_DrawString(11, 42, buf, ST7735_GREEN, ST7735_BLACK);
+/* ── Painel principal bifásico ──────────────────────────────────────────── */
+/*
+ * Layout portrait 80×160, fonte 1× (6×7 px, stride 8 px vertical):
+ *
+ *  y=  0  [2×] "AccuEnergy"  (cyan)
+ *  y= 14  ─── separador ───
+ *  y= 15  "     F1    F2 "   (gray 1×)
+ *  y= 23  "V  NNN.N NNN.N"   amarelo / cyan
+ *  y= 31  "I  NN.NN NN.NN"
+ *  y= 39  "P   NNNN  NNNN"   verde  / cyan
+ *  y= 47  "Q   NNNN  NNNN"   laranja/ cyan
+ *  y= 55  "S   NNNN  NNNN"   branco / cyan
+ *  y= 63  "fp N.NNN N.NNN"   verde  / cyan
+ *  y= 71  ─── separador ───
+ *  y= 72  barra FP fase 1    (verde, 74×5 px)
+ *  y= 78  barra FP fase 2    (cyan,  74×5 px)
+ *  y= 84  ─── separador ───
+ *  y= 85  "up NNNNN  #NNN"
+ *  y= 93  (spare)
+ *
+ * Coluna F1: x=12   Coluna F2: x=48   (5 chars × 6 px = 30 px cada)
+ */
 
-    ST7735_DrawString(0,  56, "F", ST7735_GRAY, ST7735_BLACK);
-    fmt_f3(buf, fp);
-    ST7735_DrawString(11, 56, buf, ST7735_GREEN, ST7735_BLACK);
+static uint8_t s_panel_inited = 0u;
 
-    ST7735_DrawString(0,  70, "T", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)(uptime_s % 999999u));
-    ST7735_DrawString(11, 70, buf, ST7735_WHITE, ST7735_BLACK);
+void ST7735_Main_Reset(void)
+{
+    s_panel_inited = 0u;
+}
 
-    ST7735_DrawString(0,  84, "#", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)(s_frame % 999999u));
-    ST7735_DrawString(11, 84, buf, ST7735_ORANGE, ST7735_BLACK);
+void ST7735_Main_Update(float v1, float i1, float p1, float q1, float s1, float fp1,
+                         float v2, float i2, float p2, float q2, float s2, float fp2,
+                         uint32_t uptime_s, uint32_t frame)
+{
+    char a[6], b[6];
 
-    /* ── Raw ADC (calibração / debug) ── */
-    ST7735_DrawString(0,  98, "v", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)adc_mean_v);
-    ST7735_DrawString(11, 98, buf, ST7735_CYAN, ST7735_BLACK);
+    if (!s_panel_inited) {
+        ST7735_FillScreen(ST7735_BLACK);
+        /* Título 2× */
+        ST7735_DrawString(10u, 0u, "AccuEnergy", ST7735_CYAN, ST7735_BLACK);
+        /* Separadores horizontais */
+        fill_rect(0u, 14u, 80u, 1u, ST7735_GRAY);
+        fill_rect(0u, 71u, 80u, 1u, ST7735_GRAY);
+        fill_rect(0u, 84u, 80u, 1u, ST7735_GRAY);
+        /* Cabeçalhos de coluna */
+        ST7735_DrawString1x(12u, 15u, " F1  ",    ST7735_YELLOW, ST7735_BLACK);
+        ST7735_DrawString1x(48u, 15u, " F2  ",    ST7735_CYAN,   ST7735_BLACK);
+        /* Labels de linha (estáticos) */
+        ST7735_DrawString1x(0u, 23u, "V ", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 31u, "I ", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 39u, "P ", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 47u, "Q ", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 55u, "S ", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 63u, "fp", ST7735_GRAY, ST7735_BLACK);
+        /* Labels de barra */
+        ST7735_DrawString1x(0u, 72u, "1", ST7735_YELLOW, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 78u, "2", ST7735_CYAN,   ST7735_BLACK);
+        /* Label uptime */
+        ST7735_DrawString1x(0u, 85u, "up", ST7735_GRAY, ST7735_BLACK);
+        ST7735_DrawString1x(0u, 93u, " #", ST7735_GRAY, ST7735_BLACK);
+        s_panel_inited = 1u;
+    }
 
-    ST7735_DrawString(0, 112, "i", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)adc_mean_i);
-    ST7735_DrawString(11, 112, buf, ST7735_CYAN, ST7735_BLACK);
+    /* ── Valores fase 1 (amarelo/verde/laranja/branco) ── */
+    fmtV (a, v1); ST7735_DrawString1x(12u, 23u, a, ST7735_YELLOW, ST7735_BLACK);
+    fmtI (a, i1); ST7735_DrawString1x(12u, 31u, a, ST7735_YELLOW, ST7735_BLACK);
+    fmtW (a, p1); ST7735_DrawString1x(12u, 39u, a, ST7735_GREEN,  ST7735_BLACK);
+    fmtW (a, q1); ST7735_DrawString1x(12u, 47u, a, ST7735_ORANGE, ST7735_BLACK);
+    fmtW (a, s1); ST7735_DrawString1x(12u, 55u, a, ST7735_WHITE,  ST7735_BLACK);
+    fmtFP(a, fp1);ST7735_DrawString1x(12u, 63u, a, ST7735_GREEN,  ST7735_BLACK);
 
-    ST7735_DrawString(0, 126, "a", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)adc_pp_v);
-    ST7735_DrawString(11, 126, buf, ST7735_WHITE, ST7735_BLACK);
+    /* ── Valores fase 2 (cyan) ── */
+    fmtV (b, v2); ST7735_DrawString1x(48u, 23u, b, ST7735_CYAN, ST7735_BLACK);
+    fmtI (b, i2); ST7735_DrawString1x(48u, 31u, b, ST7735_CYAN, ST7735_BLACK);
+    fmtW (b, p2); ST7735_DrawString1x(48u, 39u, b, ST7735_CYAN, ST7735_BLACK);
+    fmtW (b, q2); ST7735_DrawString1x(48u, 47u, b, ST7735_CYAN, ST7735_BLACK);
+    fmtW (b, s2); ST7735_DrawString1x(48u, 55u, b, ST7735_CYAN, ST7735_BLACK);
+    fmtFP(b, fp2);ST7735_DrawString1x(48u, 63u, b, ST7735_CYAN, ST7735_BLACK);
 
-    ST7735_DrawString(0, 140, "b", ST7735_GRAY, ST7735_BLACK);
-    snprintf(buf, sizeof(buf), "%6lu", (unsigned long)adc_pp_i);
-    ST7735_DrawString(11, 140, buf, ST7735_WHITE, ST7735_BLACK);
+    /* ── Barras de fator de potência (x=6, w=74, h=5) ── */
+    /* Verde escuro = 0x02C0, Cyan escuro = 0x0240 */
+    draw_bar(6u, 72u, 74u, 5u, fp1 < 0.0f ? -fp1 : fp1, ST7735_GREEN,  0x02C0u);
+    draw_bar(6u, 78u, 74u, 5u, fp2 < 0.0f ? -fp2 : fp2, ST7735_CYAN,   0x0240u);
+
+    /* ── Uptime e frame ── */
+    fmt5(a, (float)(uptime_s % 99999u), 0u);
+    ST7735_DrawString1x(12u, 85u, a, ST7735_WHITE,  ST7735_BLACK);
+    fmt5(b, (float)(frame     % 99999u), 0u);
+    ST7735_DrawString1x(12u, 93u, b, ST7735_ORANGE, ST7735_BLACK);
 }
