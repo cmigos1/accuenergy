@@ -988,38 +988,74 @@ class MainWindow(QMainWindow):
         wave_widget = pg.GraphicsLayoutWidget()
         wave_widget.setBackground(BG_DARK)
 
-        self._plt_v = wave_widget.addPlot(row=0, col=0)
-        self._plt_v.setTitle('<b>Tensão — V(t)</b>', color=C_V, size='11pt')
-        self._plt_v.setLabel('left', 'Tensão (V)')
-        self._plt_v.setLabel('bottom', 'Tempo (ms)')
-        self._plt_v.showGrid(x=True, y=True, alpha=0.2)
-        self._plt_v.addLegend(offset=(10, 10))
-        self._curve_v = self._plt_v.plot(pen=pg.mkPen(C_V, width=2), name='V1(t)')
-        self._curve_v2 = self._plt_v.plot(
-            pen=pg.mkPen(C_V2, width=2, style=Qt.DashLine), name='V2(t)')
-        self._line_vrms_pos = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(C_V, width=1, style=Qt.DashLine))
-        self._line_vrms_neg = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(C_V, width=1, style=Qt.DashLine))
-        self._plt_v.addItem(self._line_vrms_pos)
-        self._plt_v.addItem(self._line_vrms_neg)
+        # ── Fase 1 — V1(t) e I1(t), eixos Y independentes ────────────────────
+        self._plt_f1 = wave_widget.addPlot(row=0, col=0)
+        self._plt_f1.setTitle('<b>Fase 1 — V1(t) / I1(t)</b>', color=C_V, size='11pt')
+        self._plt_f1.setLabel('left',   'Tensão (V)',   color=C_V)
+        self._plt_f1.setLabel('right',  'Corrente (A)', color=C_I)
+        self._plt_f1.setLabel('bottom', 'Tempo (ms)')
+        self._plt_f1.showGrid(x=True, y=True, alpha=0.2)
+        self._plt_f1.showAxis('right')
 
-        self._plt_i = wave_widget.addPlot(row=1, col=0)
-        self._plt_i.setTitle('<b>Corrente — I(t)</b>', color=C_I, size='11pt')
-        self._plt_i.setLabel('left', 'Corrente (A)')
-        self._plt_i.setLabel('bottom', 'Tempo (ms)')
-        self._plt_i.showGrid(x=True, y=True, alpha=0.2)
-        self._plt_i.addLegend(offset=(10, 10))
-        self._curve_i = self._plt_i.plot(pen=pg.mkPen(C_I, width=2), name='I1(t)')
-        self._curve_i2 = self._plt_i.plot(
-            pen=pg.mkPen(C_I2, width=2, style=Qt.DashLine), name='I2(t)')
-        self._line_irms_pos = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(C_I, width=1, style=Qt.DashLine))
-        self._line_irms_neg = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(C_I, width=1, style=Qt.DashLine))
-        self._plt_i.addItem(self._line_irms_pos)
-        self._plt_i.addItem(self._line_irms_neg)
-        self._plt_i.setXLink(self._plt_v)
+        self._vb_i1 = pg.ViewBox()
+        self._plt_f1.scene().addItem(self._vb_i1)
+        self._plt_f1.getAxis('right').linkToView(self._vb_i1)
+        self._vb_i1.setXLink(self._plt_f1)
+
+        _leg_f1 = self._plt_f1.addLegend(offset=(10, 10))
+        self._curve_v  = self._plt_f1.plot(pen=pg.mkPen(C_V, width=2), name='V1(t)')
+        self._curve_i  = pg.PlotDataItem(pen=pg.mkPen(C_I, width=2))
+        self._vb_i1.addItem(self._curve_i)
+        _leg_f1.addItem(self._curve_i, 'I1(t)')
+
+        self._line_vrms_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_V, width=1, style=Qt.DashLine))
+        self._line_vrms_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_V, width=1, style=Qt.DashLine))
+        self._plt_f1.addItem(self._line_vrms_pos)
+        self._plt_f1.addItem(self._line_vrms_neg)
+        self._line_irms_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_I, width=1, style=Qt.DashLine))
+        self._line_irms_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_I, width=1, style=Qt.DashLine))
+        self._vb_i1.addItem(self._line_irms_pos)
+        self._vb_i1.addItem(self._line_irms_neg)
+
+        def _update_vb_f1():
+            self._vb_i1.setGeometry(self._plt_f1.vb.sceneBoundingRect())
+            self._vb_i1.linkedViewChanged(self._plt_f1.vb, self._vb_i1.XAxis)
+        self._plt_f1.vb.sigResized.connect(_update_vb_f1)
+
+        # ── Fase 2 — V2(t) e I2(t), eixos Y independentes ────────────────────
+        self._plt_f2 = wave_widget.addPlot(row=1, col=0)
+        self._plt_f2.setTitle('<b>Fase 2 — V2(t) / I2(t)</b>', color=C_V2, size='11pt')
+        self._plt_f2.setLabel('left',   'Tensão (V)',   color=C_V2)
+        self._plt_f2.setLabel('right',  'Corrente (A)', color=C_I2)
+        self._plt_f2.setLabel('bottom', 'Tempo (ms)')
+        self._plt_f2.showGrid(x=True, y=True, alpha=0.2)
+        self._plt_f2.showAxis('right')
+        self._plt_f2.setXLink(self._plt_f1)
+
+        self._vb_i2 = pg.ViewBox()
+        self._plt_f2.scene().addItem(self._vb_i2)
+        self._plt_f2.getAxis('right').linkToView(self._vb_i2)
+        self._vb_i2.setXLink(self._plt_f2)
+
+        _leg_f2 = self._plt_f2.addLegend(offset=(10, 10))
+        self._curve_v2 = self._plt_f2.plot(pen=pg.mkPen(C_V2, width=2), name='V2(t)')
+        self._curve_i2 = pg.PlotDataItem(pen=pg.mkPen(C_I2, width=2))
+        self._vb_i2.addItem(self._curve_i2)
+        _leg_f2.addItem(self._curve_i2, 'I2(t)')
+
+        self._line_vrms2_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_V2, width=1, style=Qt.DashLine))
+        self._line_vrms2_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_V2, width=1, style=Qt.DashLine))
+        self._plt_f2.addItem(self._line_vrms2_pos)
+        self._plt_f2.addItem(self._line_vrms2_neg)
+        self._line_irms2_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_I2, width=1, style=Qt.DashLine))
+        self._line_irms2_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen(C_I2, width=1, style=Qt.DashLine))
+        self._vb_i2.addItem(self._line_irms2_pos)
+        self._vb_i2.addItem(self._line_irms2_neg)
+
+        def _update_vb_f2():
+            self._vb_i2.setGeometry(self._plt_f2.vb.sceneBoundingRect())
+            self._vb_i2.linkedViewChanged(self._plt_f2.vb, self._vb_i2.XAxis)
+        self._plt_f2.vb.sigResized.connect(_update_vb_f2)
 
         harm_widget = pg.GraphicsLayoutWidget()
         harm_widget.setBackground(BG_DARK)
@@ -1060,10 +1096,12 @@ class MainWindow(QMainWindow):
         self._plt_hi.addItem(self._lbl_fund_i)
 
         # Ranges iniciais — evita "Cannot set range [nan, nan]" em plots vazios
-        self._plt_v.setXRange(0, T_AXIS_MS[-1], padding=0)
-        self._plt_v.setYRange(-250, 250, padding=0)
-        self._plt_i.setXRange(0, T_AXIS_MS[-1], padding=0)
-        self._plt_i.setYRange(-20, 20, padding=0)
+        self._plt_f1.setXRange(0, T_AXIS_MS[-1], padding=0)
+        self._plt_f1.setYRange(-250, 250, padding=0)
+        self._vb_i1.setYRange(-20, 20, padding=0)
+        self._plt_f2.setXRange(0, T_AXIS_MS[-1], padding=0)
+        self._plt_f2.setYRange(-250, 250, padding=0)
+        self._vb_i2.setYRange(-20, 20, padding=0)
         self._plt_hv.setXRange(0, HARM_FREQS[-1] + F0_HZ, padding=0)
         self._plt_hv.setYRange(0, 1, padding=0)
         self._plt_hi.setXRange(0, HARM_FREQS[-1] + F0_HZ, padding=0)
@@ -1187,6 +1225,13 @@ class MainWindow(QMainWindow):
 
         self._curve_v2.setData(T_AXIS_MS, d['v_wave'])
         self._curve_i2.setData(T_AXIS_MS, d['i_wave'])
+
+        vrms2_pk = d['vrms'] * np.sqrt(2.0)
+        irms2_pk = d['irms'] * np.sqrt(2.0)
+        self._line_vrms2_pos.setPos( vrms2_pk)
+        self._line_vrms2_neg.setPos(-vrms2_pk)
+        self._line_irms2_pos.setPos( irms2_pk)
+        self._line_irms2_neg.setPos(-irms2_pk)
 
         # Guarda para o gravador associar à próxima linha (frame 0x01)
         self._last_p2 = {
