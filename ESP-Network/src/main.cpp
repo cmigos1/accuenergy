@@ -17,16 +17,23 @@
 #define HARM_MAX_ESP          50       // harmônicos no frame 0x02
 
 // ── Protocolo IDF ─────────────────────────────────────────────────────────────
-// Frame: [AB CD 01] [Vrms f4][Irms f4][FP f4][Preal f4][Q f4][S f4]
-//        [N u8][step u8] [N × (V_i16 I_i16)] [EF FE]
-// Header pós-magic: 6 floats (24 B) + N (1 B) + step (1 B) = 26 B
+// Frame 0x01/0x03 (potência F1/F2):
+//   [AB CD tt] [Vrms f4][Irms f4][FP f4][Preal f4][Q f4][S f4]
+//   [N u8][step u8] [N × (V_i32 I_i32)] [EF FE]
+//   Header pós-magic: 6×f32 (24 B) + N (1 B) + step (1 B) = 26 B
+//   Amostras: N × 2 × 4 B = N*8 B  (int32 desde Jun/2026 — era int16 N*4 B)
+//   Total típico (N=128): 3 + 26 + 1024 + 2 = 1055 bytes
+//
+// Frame 0x02/0x04 (harmônicos F1/F2):
+//   [AB CD tt] THD_V(f32) THD_I(f32) HarmV[50](f32) HarmI[50](f32) [EF FE]
+//   Total: 413 bytes
 
 enum State : uint8_t {
     WAIT_AB, WAIT_CD, WAIT_TYPE,
-    READ_HDR,                       // frame 0x01: lê 26 bytes de header
-    SKIP_SAMPLES,                   // frame 0x01: descarta N*4 bytes de amostras
+    READ_HDR,                       // frame 0x01/0x03: lê 26 bytes de header
+    SKIP_SAMPLES,                   // frame 0x01/0x03: descarta N*8 bytes de amostras (int32)
     WAIT_EF, WAIT_FE,
-    READ_HARM,                      // frame 0x02: lê 408 bytes (THD_V+THD_I+50*V+50*I floats)
+    READ_HARM,                      // frame 0x02/0x04: lê 408 bytes (THD_V+THD_I+50*V+50*I floats)
     WAIT_HARM_EF, WAIT_HARM_FE
 };
 
@@ -46,14 +53,16 @@ static char    lineBuf[200];
 static uint8_t linePos  = 0;
 static bool    inLine   = false;
 
-static uint32_t pktOk  = 0;
-static uint32_t pktErr = 0;
+static uint32_t pktOk   = 0;
+static uint32_t pktErr  = 0;
+static uint8_t  curPhase = 1u;   // fase do frame em processamento (1 ou 2)
 
 // ── Dados compartilhados Core 1 → Core 0 (via fila FreeRTOS) ─────────────────
 struct MeterData {
-    float  vrms, irms, fp, preal, q, s;
-    double kwh;
-    time_t ts;
+    float   vrms, irms, fp, preal, q, s;
+    double  kwh;
+    time_t  ts;
+    uint8_t phase;
 };
 
 static QueueHandle_t mqttQueue;
@@ -88,38 +97,40 @@ static void emitHarmonics(void)
 {
     float thd_v, thd_i;
     float harmV[HARM_MAX_ESP], harmI[HARM_MAX_ESP];
-    memcpy(&thd_v,  &harmBuf[0],   4);
-    memcpy(&thd_i,  &harmBuf[4],   4);
-    memcpy(harmV,   &harmBuf[8],   HARM_MAX_ESP * 4);
-    memcpy(harmI,   &harmBuf[8 + HARM_MAX_ESP * 4], HARM_MAX_ESP * 4);
+    memcpy(&thd_v, &harmBuf[0],                   4);
+    memcpy(&thd_i, &harmBuf[4],                   4);
+    memcpy(harmV,  &harmBuf[8],                   HARM_MAX_ESP * 4);
+    memcpy(harmI,  &harmBuf[8 + HARM_MAX_ESP * 4], HARM_MAX_ESP * 4);
 
     if (isnan(thd_v) || isnan(thd_i)) { pktErr++; return; }
 
-    StaticJsonDocument<1024> doc;
-    doc["ts"]    = (time(nullptr) > 1577836800LL) ? String("") : String("unsynced");
+    // Tamanho: 2 arrays×50 floats × ~8B + overhead + ts/thd ≈ 1400 B
+    StaticJsonDocument<2048> doc;
+
+    char ts_buf[32];
+    if (time(nullptr) > 1577836800LL) {
+        struct tm tm_info;
+        time_t now = time(nullptr);
+        localtime_r(&now, &tm_info);
+        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", &tm_info);
+    } else {
+        snprintf(ts_buf, sizeof(ts_buf), "unsynced");
+    }
+
+    doc["ts"]    = ts_buf;
+    doc["phase"] = curPhase;
     doc["thd_v"] = serialized(String(thd_v, 4));
     doc["thd_i"] = serialized(String(thd_i, 4));
 
-    // Publica as 3 primeiras harmônicas de forma individual para NILM
-    char key[8];
-    for (int h = 1; h <= 5 && h <= HARM_MAX_ESP; h++) {
-        snprintf(key, sizeof(key), "v%d", h);
-        doc[key] = serialized(String(harmV[h-1], 4));
-        snprintf(key, sizeof(key), "i%d", h);
-        doc[key] = serialized(String(harmI[h-1], 4));
+    // Arrays completos harm_v[50] e harm_i[50] — formato esperado pelo mqtt_ingest.py
+    JsonArray arrV = doc.createNestedArray("harm_v");
+    JsonArray arrI = doc.createNestedArray("harm_i");
+    for (int h = 0; h < HARM_MAX_ESP; h++) {
+        arrV.add(serialized(String(harmV[h], 4)));
+        arrI.add(serialized(String(harmI[h], 4)));
     }
 
-    // Timestamp
-    if (time(nullptr) > 1577836800LL) {
-        char ts_buf[32];
-        struct tm tm_info;
-        time_t ts = time(nullptr);
-        localtime_r(&ts, &tm_info);
-        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", &tm_info);
-        doc["ts"] = ts_buf;
-    }
-
-    char payload[1024];
+    char payload[1500];
     if (mqttClient.connected()) {
         size_t len = serializeJson(doc, payload, sizeof(payload));
         mqttClient.publish(MQTT_TOPIC_HARM, payload, len);
@@ -156,6 +167,7 @@ static void emitData(void)
     data.s     = S;
     data.kwh   = g_kwh;
     data.ts    = time(nullptr);
+    data.phase = curPhase;
 
     // Não bloqueia o parser se a fila estiver cheia
     xQueueSend(mqttQueue, &data, 0);
@@ -195,15 +207,17 @@ static void processByte(uint8_t b)
         state = (b == 0xCDu) ? WAIT_TYPE : WAIT_AB;
         break;
     case WAIT_TYPE:
-        if      (b == 0x01u) { hdrPos = 0; state = READ_HDR; }
-        else if (b == 0x02u) { harmPos = 0; state = READ_HARM; }
+        if      (b == 0x01u) { curPhase = 1u; hdrPos = 0;  state = READ_HDR;  }
+        else if (b == 0x03u) { curPhase = 2u; hdrPos = 0;  state = READ_HDR;  }
+        else if (b == 0x02u) { curPhase = 1u; harmPos = 0; state = READ_HARM; }
+        else if (b == 0x04u) { curPhase = 2u; harmPos = 0; state = READ_HARM; }
         else                   state = WAIT_AB;
         break;
     case READ_HDR:
         hdr[hdrPos++] = b;
         if (hdrPos == 26u) {
             uint8_t N = hdr[24];
-            skipLeft  = (uint32_t)N * 4u;
+            skipLeft  = (uint32_t)N * 8u;   // int32: 2×int32 por amostra = 8 bytes
             state     = (skipLeft > 0u) ? SKIP_SAMPLES : WAIT_EF;
         }
         break;
@@ -287,8 +301,8 @@ static void mqtt_task(void *pvParams)
     mqtt_connect();
 
     MeterData data;
-    StaticJsonDocument<256> doc;
-    char payload[256];
+    StaticJsonDocument<384> doc;
+    char payload[384];
     char ts_buf[32];
     double kwhToSave   = 0.0;
     uint32_t lastSaveMs = 0;
@@ -320,6 +334,7 @@ static void mqtt_task(void *pvParams)
 
             doc.clear();
             doc["ts"]    = ts_buf;
+            doc["phase"] = data.phase;
             doc["vrms"]  = serialized(String(data.vrms,  2));
             doc["irms"]  = serialized(String(data.irms,  4));
             doc["preal"] = serialized(String(data.preal, 2));
@@ -361,6 +376,7 @@ void setup()
     pinMode(BTN_PIN, INPUT_PULLUP);
 
     mqttQueue = xQueueCreate(MQTT_QUEUE_LEN, sizeof(MeterData));
+    mqttClient.setBufferSize(1200);   // necessário para payload de harmônicos (~1400 B serializado)
 
     // US9: task MQTT pinada no Core 0 (stack TCP/IP do ESP-IDF roda lá)
     xTaskCreatePinnedToCore(
