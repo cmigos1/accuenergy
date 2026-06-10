@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\cmigo\\\\Dev\\\\accuenergy\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(Select-Object FullName, Extension)",
+      "Bash(Sort-Object Extension)",
+      "WebSearch",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:docs.openenergymonitor.org)",
+      "WebFetch(domain:community.openenergymonitor.org)"
+    ]
+  }
+}

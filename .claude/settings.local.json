@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\STM32_UART_Bridge\" -File)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(\\(Get-Item \"C:\\\\Users\\\\cmigo\\\\Dev\\\\accuenergy\\\\visualizacao\"\\).GetFiles\\(\\) | ForEach-Object { $_.Name })",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\cmigo\\\\Dev\\\\accuenergy\\\\esp32_idf_1fase\" -Recurse -Directory)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\cmigo\\\\Dev\\\\accuenergy\\\\esp32_idf_1fase\" -Recurse | Where-Object {$_.PSIsContainer} | ForEach-Object {$_.FullName})",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\ /AD /B\")",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\Dev\\\\ /AD /B\")",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\MedidorPotencia\\\\src\\\\ /B\")",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\Accuenergy\\\\src\\\\ /B\" 2>&1)",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\esp32_interno\\\\src\\\\ /B\" 2>&1)",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\esp32_interno\\\\src\\\\ /B\")",
+      "PowerShell(cmd /c \"where /r C:\\\\Users\\\\cmigo calculo.c calculo.h calculo.cpp 2>nul\")",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\calibracaozmpt101b\\\\src\\\\ /B\" 2>&1)",
+      "PowerShell(cmd /c \"type C:\\\\Users\\\\cmigo\\\\OneDrive\\\\Documents\\\\PlatformIO\\\\Projects\\\\esp32_interno\\\\platformio.ini\")",
+      "PowerShell(cmd /c \"type C:\\\\Users\\\\cmigo\\\\Dev\\\\accuenergy\\\\esp32_interno\\\\platformio.ini\" 2>&1)",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\cmigo\\\\STM32CubeIDE\\\\ /AD /B\" 2>&1; cmd /c \"dir C:\\\\Users\\\\cmigo\\\\Documents\\\\ /AD /B\" 2>&1)"
+    ]
+  }
+}

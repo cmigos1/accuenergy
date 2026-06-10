@@ -1,0 +1,18 @@
+{
+  "_comentario": "Assinaturas manuais para o detector Hart. dp/dq em W e VAr (positivo=liga, negativo=desliga). tol = tolerância relativa [0..1].",
+
+  "Geladeira_liga":      { "dp":  180, "dq":  50, "tol": 0.25 },
+  "Geladeira_desliga":   { "dp": -175, "dq": -45, "tol": 0.25 },
+
+  "ArCondicionado_liga": { "dp": 1200, "dq": 300, "tol": 0.15 },
+  "ArCondicionado_desl": { "dp":-1190, "dq":-295, "tol": 0.15 },
+
+  "Ventilador_liga":     { "dp":   65, "dq":  20, "tol": 0.30 },
+  "Ventilador_desliga":  { "dp":  -60, "dq": -18, "tol": 0.30 },
+
+  "Televisor_liga":      { "dp":  100, "dq":  10, "tol": 0.25 },
+  "Televisor_desliga":   { "dp":  -95, "dq":  -8, "tol": 0.25 },
+
+  "Chuveiro_liga":       { "dp": 4500, "dq":   5, "tol": 0.10 },
+  "Chuveiro_desliga":    { "dp":-4490, "dq":  -3, "tol": 0.10 }
+}

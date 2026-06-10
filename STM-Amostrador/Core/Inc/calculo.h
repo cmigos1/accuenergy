@@ -6,13 +6,11 @@
 
 /* SCT013-100 (100A:50mA) — burden 50 Ω (era 11 Ω) para maior sensibilidade em baixas correntes.
  *   Zener 1N4728A (3.3V) protege excursão positiva: sem ele V_ADC_max = 1.65 + 50mA×50Ω = 4.15V > VDDA.
- *   Range antes do clipping: (3.3V − 1.65V)/50Ω = 33mA sec → 66A pico → ~46.7A RMS no primário.
- *   ATENÇÃO: excursão negativa chega a 1.65 − 2.5 = −0.85V (Zener não protege esse lado);
- *   clampeado pelos diodos internos do STM32, mas considere Schottky GND no pino PC4. */
+ *   Range antes do clipping: (3.3V − 1.65V)/50Ω = 33mA sec → 66A pico → ~46.7A RMS no primário.*/
 #define SCT013_CT_RATIO    (100.0f / 0.050f)           /* 2000:1 */
 #define SCT013_BURDEN_OHM  50.0f
 #define SCT013_FACTOR      (SCT013_CT_RATIO / SCT013_BURDEN_OHM)
-#define SCT013_SIGN        (-1.0f)  /* -1.0f = clamp invertido no fio; +1.0f = correto */
+#define SCT013_SIGN        (1.0f)  /* -1.0f = clamp invertido no fio; +1.0f = correto */
 
 /* ZMPT101B standalone (transformador puro, sem módulo op-amp)
  *   Circuito: R1=136kΩ (dois 68kΩ série) no primário, R2=1kΩ burden no secundário
