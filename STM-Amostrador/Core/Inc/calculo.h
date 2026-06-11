@@ -10,7 +10,7 @@
 #define SCT013_CT_RATIO    (100.0f / 0.050f)           /* 2000:1 */
 #define SCT013_BURDEN_OHM  50.0f
 #define SCT013_FACTOR      (SCT013_CT_RATIO / SCT013_BURDEN_OHM)
-#define SCT013_SIGN        (1.0f)  /* -1.0f = clamp invertido no fio; +1.0f = correto */
+#define SCT013_SIGN        (-1.0f)  /* -1.0f = clamp invertido no fio; +1.0f = correto */
 
 /* ZMPT101B standalone (transformador puro, sem módulo op-amp)
  *   Circuito: R1=136kΩ (dois 68kΩ série) no primário, R2=1kΩ burden no secundário

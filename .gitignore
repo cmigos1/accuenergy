@@ -6,3 +6,7 @@ STM-Amostrador/build
 *.vscode
 .vscode
 STM-Amostrador/.settings
+
+# Dados gravados em runtime (medições / harmônicos)
+*.csv
+*.h5

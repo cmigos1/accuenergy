@@ -2,17 +2,18 @@
 #include <string.h>
 #include <time.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "esp_task_wdt.h"
 #include "config.h"
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 #define KWH_FILE              "/kwh.bin"
 #define KWH_SAVE_INTERVAL_MS  60000u   // salva no LittleFS a cada 60 s
 #define SAMPLE_PERIOD_S       0.080f   // STM32 envia a cada ~80 ms (66.7ms aquisição + processamento)
-#define MQTT_QUEUE_LEN        8        // frames em espera para publicação
+#define MQTT_QUEUE_LEN        4        // frames em espera — fila pequena, descarta sobra
+#define MQTT_PUB_INTERVAL_MS  500u     // throttle: máx 2 publicações/s por fase
 #define MQTT_TOPIC_HARM       "energia/harmonicas"
 #define HARM_MAX_ESP          50       // harmônicos no frame 0x02
 
@@ -49,15 +50,12 @@ static uint32_t skipLeft = 0;
 static uint8_t  harmBuf[408];   // THD_V(4) + THD_I(4) + HarmV[50](200) + HarmI[50](200)
 static uint16_t harmPos  = 0;
 
-static char    lineBuf[200];
-static uint8_t linePos  = 0;
-static bool    inLine   = false;
-
 static uint32_t pktOk   = 0;
 static uint32_t pktErr  = 0;
+static uint32_t rxBytes = 0;   // total de bytes recebidos no UART2 (diagnóstico)
 static uint8_t  curPhase = 1u;   // fase do frame em processamento (1 ou 2)
 
-// ── Dados compartilhados Core 1 → Core 0 (via fila FreeRTOS) ─────────────────
+// ── Dados compartilhados Core 1 → Core 0 (via filas FreeRTOS) ────────────────
 struct MeterData {
     float   vrms, irms, fp, preal, q, s;
     double  kwh;
@@ -65,7 +63,14 @@ struct MeterData {
     uint8_t phase;
 };
 
+struct HarmData {
+    uint8_t buf[408];   // cópia de harmBuf: THD_V(4)+THD_I(4)+HarmV[50](200)+HarmI[50](200)
+    uint8_t phase;
+    time_t  ts;
+};
+
 static QueueHandle_t mqttQueue;
+static QueueHandle_t harmQueue;
 
 // ── Acumulador kWh (apenas escrito no Core 1) ─────────────────────────────────
 static double g_kwh = 0.0;
@@ -89,52 +94,24 @@ static void kwh_save(double value)
 }
 
 // ── Forward declarations ───────────────────────────────────────────────────────
-static WiFiClientSecure wifiClient;
-static PubSubClient     mqttClient(wifiClient);
+static WiFiClient    wifiClient;
+static PubSubClient  mqttClient(wifiClient);
 
 // ── Parser IDF ────────────────────────────────────────────────────────────────
 static void emitHarmonics(void)
 {
+    // Valida antes de enfileirar
     float thd_v, thd_i;
-    float harmV[HARM_MAX_ESP], harmI[HARM_MAX_ESP];
-    memcpy(&thd_v, &harmBuf[0],                   4);
-    memcpy(&thd_i, &harmBuf[4],                   4);
-    memcpy(harmV,  &harmBuf[8],                   HARM_MAX_ESP * 4);
-    memcpy(harmI,  &harmBuf[8 + HARM_MAX_ESP * 4], HARM_MAX_ESP * 4);
-
+    memcpy(&thd_v, &harmBuf[0], 4);
+    memcpy(&thd_i, &harmBuf[4], 4);
     if (isnan(thd_v) || isnan(thd_i)) { pktErr++; return; }
 
-    // Tamanho: 2 arrays×50 floats × ~8B + overhead + ts/thd ≈ 1400 B
-    StaticJsonDocument<2048> doc;
-
-    char ts_buf[32];
-    if (time(nullptr) > 1577836800LL) {
-        struct tm tm_info;
-        time_t now = time(nullptr);
-        localtime_r(&now, &tm_info);
-        strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", &tm_info);
-    } else {
-        snprintf(ts_buf, sizeof(ts_buf), "unsynced");
-    }
-
-    doc["ts"]    = ts_buf;
-    doc["phase"] = curPhase;
-    doc["thd_v"] = serialized(String(thd_v, 4));
-    doc["thd_i"] = serialized(String(thd_i, 4));
-
-    // Arrays completos harm_v[50] e harm_i[50] — formato esperado pelo mqtt_ingest.py
-    JsonArray arrV = doc.createNestedArray("harm_v");
-    JsonArray arrI = doc.createNestedArray("harm_i");
-    for (int h = 0; h < HARM_MAX_ESP; h++) {
-        arrV.add(serialized(String(harmV[h], 4)));
-        arrI.add(serialized(String(harmI[h], 4)));
-    }
-
-    char payload[1500];
-    if (mqttClient.connected()) {
-        size_t len = serializeJson(doc, payload, sizeof(payload));
-        mqttClient.publish(MQTT_TOPIC_HARM, payload, len);
-    }
+    // Copia para a fila — publicação feita pelo mqtt_task no Core 0
+    HarmData hd;
+    memcpy(hd.buf, harmBuf, 408);
+    hd.phase = curPhase;
+    hd.ts    = time(nullptr);
+    xQueueSend(harmQueue, &hd, 0);   // descarta se fila cheia (dado não crítico)
     pktOk++;
 }
 
@@ -154,6 +131,16 @@ static void emitData(void)
     }
     pktOk++;
 
+#if PHASE1_CT_INVERTED
+    // Corrige CT invertido da fase 1: o vetor de corrente está negado, então
+    // Preal/Q/FP saem negativos. S e Irms são magnitudes (inalterados).
+    if (curPhase == 1u) {
+        Preal = -Preal;
+        Q     = -Q;
+        FP    = -FP;
+    }
+#endif
+
     // Acumula kWh: P[W] × t[s] / 3 600 000 = kWh
     if (Preal > 0.0f)
         g_kwh += (double)Preal * SAMPLE_PERIOD_S / 3600000.0;
@@ -172,33 +159,12 @@ static void emitData(void)
     // Não bloqueia o parser se a fila estiver cheia
     xQueueSend(mqttQueue, &data, 0);
 
-    // CSV mantido para compatibilidade com gui_bridge.py
-    Serial.printf("METER,%.2f,%.4f,%.2f,%.2f,%.2f,%.4f\r\n",
-                  Vrms, Irms, Preal, S, Q, FP);
+    Serial.printf("METER,%u,%.2f,%.4f,%.2f,%.2f,%.2f,%.4f,%.6f\r\n",
+                  (unsigned)curPhase, Vrms, Irms, Preal, S, Q, FP, g_kwh);
 }
 
 static void processByte(uint8_t b)
 {
-    if (state == WAIT_AB) {
-        if (inLine) {
-            if (b == '\n' || linePos >= (uint8_t)(sizeof(lineBuf) - 1)) {
-                lineBuf[linePos] = '\0';
-                Serial.println(lineBuf);
-                inLine  = false;
-                linePos = 0;
-            } else if (b != '\r') {
-                lineBuf[linePos++] = (char)b;
-            }
-            return;
-        }
-        if (b == (uint8_t)'#') {
-            lineBuf[0] = '#';
-            linePos    = 1;
-            inLine     = true;
-            return;
-        }
-    }
-
     switch (state) {
     case WAIT_AB:
         if (b == 0xABu) state = WAIT_CD;
@@ -217,7 +183,12 @@ static void processByte(uint8_t b)
         hdr[hdrPos++] = b;
         if (hdrPos == 26u) {
             uint8_t N = hdr[24];
+            uint8_t step = hdr[25];
             skipLeft  = (uint32_t)N * 8u;   // int32: 2×int32 por amostra = 8 bytes
+            if (pktOk == 0u && pktErr < 3u) {
+                Serial.printf("# [DBG] N=%u step=%u skipLeft=%lu phase=%u\r\n",
+                              N, step, skipLeft, (unsigned)curPhase);
+            }
             state     = (skipLeft > 0u) ? SKIP_SAMPLES : WAIT_EF;
         }
         break;
@@ -271,7 +242,6 @@ static void wifi_connect(void)
         Serial.printf("# [ESP32 WiFi] IP: %s  DNS: 8.8.8.8\r\n",
                       WiFi.localIP().toString().c_str());
         configTzTime(NTP_TZ, NTP_SERVER);
-        wifiClient.setInsecure();
     } else {
         Serial.println("# [ESP32 WiFi] falha — tentará novamente");
     }
@@ -284,7 +254,7 @@ static void mqtt_connect(void)
     uint8_t tries = 0;
     while (!mqttClient.connected() && tries < 3) {
         if (debugMode) return;
-        if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) {
+        if (mqttClient.connect(MQTT_CLIENT_ID)) {
             Serial.println("# [ESP32 MQTT] conectado");
         } else {
             Serial.printf("# [ESP32 MQTT] falha rc=%d, retry\r\n", mqttClient.state());
@@ -296,16 +266,23 @@ static void mqtt_connect(void)
 
 static void mqtt_task(void *pvParams)
 {
-    // Core 0 — mesma afinidade do stack TCP/IP
+    esp_task_wdt_delete(NULL);
+
     wifi_connect();
     mqtt_connect();
 
-    MeterData data;
-    StaticJsonDocument<384> doc;
-    char payload[384];
-    char ts_buf[32];
+    // Buffers na heap — evita stack overflow (TLS + harmonics + JSON = >8 KB na stack)
+    MeterData *data    = new MeterData();
+    HarmData  *hd      = new HarmData();
+    char      *payload  = new char[400];
+    char      *hpayload = new char[1200];
+    char       ts_buf[32];
     double kwhToSave   = 0.0;
     uint32_t lastSaveMs = 0;
+    DynamicJsonDocument doc(400);
+    DynamicJsonDocument hdoc(2200);
+
+    uint32_t lastPubMs[2] = {0u, 0u};  // throttle por fase (índice 0=F1, 1=F2)
 
     for (;;) {
         // Reconexão automática Wi-Fi / MQTT
@@ -320,33 +297,70 @@ static void mqtt_task(void *pvParams)
         mqttClient.loop();
 
         // Aguarda frame da fila (até 100 ms) — mantém loop() leve
-        if (xQueueReceive(mqttQueue, &data, pdMS_TO_TICKS(100)) == pdTRUE) {
-            kwhToSave = data.kwh;
+        if (xQueueReceive(mqttQueue, data, pdMS_TO_TICKS(100)) == pdTRUE) {
+            kwhToSave = data->kwh;
 
-            // Timestamp ISO 8601 — exige NTP sincronizado (ts > 2020-01-01)
-            if (data.ts > 1577836800LL) {
+            // Throttle: publica no máx a cada MQTT_PUB_INTERVAL_MS por fase
+            uint8_t phIdx = (data->phase == 1u) ? 0u : 1u;
+            uint32_t nowMs = millis();
+            if (mqttClient.connected() && (nowMs - lastPubMs[phIdx]) >= MQTT_PUB_INTERVAL_MS) {
+                lastPubMs[phIdx] = nowMs;
+
+                // Timestamp ISO 8601 — exige NTP sincronizado (ts > 2020-01-01)
+                if (data->ts > 1577836800LL) {
+                    struct tm tm_info;
+                    localtime_r(&data->ts, &tm_info);
+                    strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", &tm_info);
+                } else {
+                    snprintf(ts_buf, sizeof(ts_buf), "unsynced");
+                }
+
+                doc.clear();
+                doc["ts"]    = ts_buf;
+                doc["phase"] = data->phase;
+                doc["vrms"]  = serialized(String(data->vrms,  2));
+                doc["irms"]  = serialized(String(data->irms,  4));
+                doc["preal"] = serialized(String(data->preal, 2));
+                doc["s"]     = serialized(String(data->s,     2));
+                doc["q"]     = serialized(String(data->q,     2));
+                doc["fp"]    = serialized(String(data->fp,    4));
+                doc["kwh"]   = serialized(String(data->kwh,   6));
+
+                size_t len = serializeJson(doc, payload, 400u);
+                mqttClient.publish(MQTT_TOPIC, payload, len);
+            }
+        }
+
+        // Processa frame harmônico da fila (não bloqueante)
+        if (xQueueReceive(harmQueue, hd, 0) == pdTRUE && mqttClient.connected()) {
+            float thd_v, thd_i;
+            float harmV[HARM_MAX_ESP], harmI[HARM_MAX_ESP];
+            memcpy(&thd_v, &hd->buf[0],                    4);
+            memcpy(&thd_i, &hd->buf[4],                    4);
+            memcpy(harmV,  &hd->buf[8],                    HARM_MAX_ESP * 4);
+            memcpy(harmI,  &hd->buf[8 + HARM_MAX_ESP * 4], HARM_MAX_ESP * 4);
+
+            if (hd->ts > 1577836800LL) {
                 struct tm tm_info;
-                localtime_r(&data.ts, &tm_info);
+                localtime_r(&hd->ts, &tm_info);
                 strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", &tm_info);
             } else {
                 snprintf(ts_buf, sizeof(ts_buf), "unsynced");
             }
 
-            doc.clear();
-            doc["ts"]    = ts_buf;
-            doc["phase"] = data.phase;
-            doc["vrms"]  = serialized(String(data.vrms,  2));
-            doc["irms"]  = serialized(String(data.irms,  4));
-            doc["preal"] = serialized(String(data.preal, 2));
-            doc["s"]     = serialized(String(data.s,     2));
-            doc["q"]     = serialized(String(data.q,     2));
-            doc["fp"]    = serialized(String(data.fp,    4));
-            doc["kwh"]   = serialized(String(data.kwh,   6));
-
-            if (mqttClient.connected()) {
-                size_t len = serializeJson(doc, payload, sizeof(payload));
-                mqttClient.publish(MQTT_TOPIC, payload, len);
+            hdoc.clear();
+            hdoc["ts"]    = ts_buf;
+            hdoc["phase"] = hd->phase;
+            hdoc["thd_v"] = serialized(String(thd_v, 4));
+            hdoc["thd_i"] = serialized(String(thd_i, 4));
+            JsonArray arrV = hdoc.createNestedArray("harm_v");
+            JsonArray arrI = hdoc.createNestedArray("harm_i");
+            for (int h = 0; h < HARM_MAX_ESP; h++) {
+                arrV.add(serialized(String(harmV[h], 4)));
+                arrI.add(serialized(String(harmI[h], 4)));
             }
+            size_t hlen = serializeJson(hdoc, hpayload, 1200u);
+            mqttClient.publish(MQTT_TOPIC_HARM, hpayload, hlen);
         }
 
         // Persiste kWh no LittleFS a cada KWH_SAVE_INTERVAL_MS
@@ -372,16 +386,20 @@ void setup()
 
     Serial.printf("# [ESP32] kWh recuperado: %.6f\r\n", g_kwh);
 
+    // RX buffer grande: frame=1055 B a 460800 baud (~33 KB/s). O default de 256 B
+    // estoura no meio do frame e dessincroniza o parser. 8 KB cobre ~7 frames.
+    stmSerial.setRxBufferSize(8192);
     stmSerial.begin(460800, SERIAL_8N1, 16, 17);
     pinMode(BTN_PIN, INPUT_PULLUP);
 
     mqttQueue = xQueueCreate(MQTT_QUEUE_LEN, sizeof(MeterData));
-    mqttClient.setBufferSize(1200);   // necessário para payload de harmônicos (~1400 B serializado)
+    harmQueue = xQueueCreate(2,              sizeof(HarmData));
+    mqttClient.setBufferSize(1200);
 
     // US9: task MQTT pinada no Core 0 (stack TCP/IP do ESP-IDF roda lá)
     xTaskCreatePinnedToCore(
         mqtt_task, "mqtt_task",
-        8192,    /* stack bytes */
+        16384,   /* stack bytes — aumentado: heap buffers + TLS + ArduinoJson */
         nullptr,
         1,       /* priority */
         nullptr,
@@ -389,19 +407,58 @@ void setup()
     );
 }
 
+// Envia byte 'S' ao STM32 e loga na USB
+static void send_skip_cal(void)
+{
+    stmSerial.write('S');
+    Serial.println("# [ESP32] Comando skip_cal enviado ao STM32");
+}
+
 void loop()
 {
     // Core 1: parser IDF em tempo real
-    while (stmSerial.available())
+    while (stmSerial.available()) {
+        rxBytes++;
         processByte((uint8_t)stmSerial.read());
+    }
 
-    // Botão BOOT (GPIO0, ativo baixo) — status via serial
+    // Comandos recebidos da USB Serial (GUI ou terminal)
+    while (Serial.available()) {
+        static char cmdBuf[32];
+        static uint8_t cmdPos = 0u;
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (cmdPos > 0u) {
+                cmdBuf[cmdPos] = '\0';
+                if (strcmp(cmdBuf, "skip_cal") == 0) {
+                    send_skip_cal();
+                }
+                cmdPos = 0u;
+            }
+        } else if (cmdPos < 31u) {
+            cmdBuf[cmdPos++] = c;
+        }
+    }
+
+    // Log periódico de stats de parser (a cada 5 s) para diagnóstico
+    static uint32_t statsMs = 0u;
+    if ((millis() - statsMs) >= 5000u) {
+        statsMs = millis();
+        Serial.printf("# [ESP32] rxBytes:%lu pktOk:%lu pktErr:%lu WiFi:%d MQTT:%d\r\n",
+                      (unsigned long)rxBytes,
+                      (unsigned long)pktOk, (unsigned long)pktErr,
+                      (int)(WiFi.status() == WL_CONNECTED),
+                      (int)mqttClient.connected());
+    }
+
+    // Botão BOOT (GPIO0, ativo baixo) — toque curto: skip_cal no STM32 + status
     static uint32_t btnLastMs = 0u;
     if (digitalRead(BTN_PIN) == LOW && (millis() - btnLastMs) >= 300u) {
         btnLastMs = millis();
+        send_skip_cal();
         debugMode = !debugMode;
         if (debugMode) {
-            Serial.println("# [ESP32] MODO DEBUG ATIVADO: Reconexoes desabilitadas. Lendo apenas serial.");
+            Serial.println("# [ESP32] MODO DEBUG ATIVADO: Reconexoes desabilitadas.");
         } else {
             Serial.println("# [ESP32] MODO NORMAL ATIVADO: Reconexoes habilitadas.");
         }

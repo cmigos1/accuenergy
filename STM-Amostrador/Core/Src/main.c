@@ -614,8 +614,12 @@ int main(void)
   memset((void *)adcDmaBuf,  0, sizeof(adcDmaBuf));
   memset((void *)adcDmaBuf2, 0, sizeof(adcDmaBuf2));
 
-  /* Calibração automática do piso de ruído — certifique-se de não ter cargas conectadas */
-  Calibrate_NoiseFloor();
+  /* Calibração desabilitada — pisos fixos nos valores mínimos */
+  g_v_floor  = V_NOISE_FLOOR_MIN;
+  g_v_floor2 = V_NOISE_FLOOR_MIN;
+  g_i_floor  = I_NOISE_FLOOR_MIN;
+  g_i_floor2 = I_NOISE_FLOOR_MIN;
+  /* Calibrate_NoiseFloor(); */
 
   /* Inicia primeira aquisição DMA — ADC2 e ADC1 armados antes do timer para
    * capturarem o mesmo primeiro trigger (fases alinhadas) */
@@ -664,26 +668,11 @@ int main(void)
         HAL_TIM_Base_Start(&htim2);
     }
 
-    /* Botão KEY (PC13, ativo ALTO) — debounce 300 ms
-     * Pressionar com nada conectado recalibra o piso de ruído. */
+    /* Botão KEY (PC13, ativo ALTO) — debounce 300 ms — envia status via LPUART1 */
     if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
         if ((HAL_GetTick() - btnLastTick) >= 300u) {
             btnLastTick = HAL_GetTick();
-            HAL_TIM_Base_Stop(&htim2);
-            HAL_ADC_Stop_DMA(&hadc1);
-            HAL_ADC_Stop_DMA(&hadc2);
-            Calibrate_NoiseFloor();
             Debug_SendStatus();
-            /* Reinicia aquisição das duas fases após calibração */
-            HAL_ADC_Stop_DMA(&hadc1);
-            HAL_ADC_Stop_DMA(&hadc2);
-            __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
-            __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC);
-            samplesReady  = 0u;
-            samplesReady2 = 0u;
-            HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adcDmaBuf2, NUM_SAMPLES * 2u);
-            HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adcDmaBuf,  NUM_SAMPLES * 2u);
-            HAL_TIM_Base_Start(&htim2);
         }
     }
   }

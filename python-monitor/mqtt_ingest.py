@@ -4,9 +4,8 @@ AccuEnergy MQTT Ingestor — assina energia/medidor e energia/harmonicas
 e salva CSV sequencial com timestamp UTC.
 
 Uso:
-    python mqtt_ingest.py --broker <host> --user <u> --password <p>
-    python mqtt_ingest.py --broker <host> --user <u> --password <p> \\
-                          --output dados.csv --harm harmonicas.csv
+    python mqtt_ingest.py
+    python mqtt_ingest.py --output dados.csv --harm harmonicas.csv
 """
 
 import argparse
@@ -17,6 +16,10 @@ import pathlib
 import sys
 
 import paho.mqtt.client as mqtt
+
+# ── Broker local (Mosquitto) ──────────────────────────────────────────────────
+_BROKER = '127.0.0.1'
+_PORT   = 1883
 
 CSV_HEADER = ['ts', 'vrms', 'irms', 'preal', 's', 'q', 'fp', 'kwh']
 HARM_HEADER = (
@@ -83,7 +86,7 @@ class Ingestor:
 
 
 def build_client(
-    broker: str, port: int, user: str, password: str,
+    broker: str, port: int,
     topic_med: str, topic_harm: str | None,
     ingestor: Ingestor,
 ) -> mqtt.Client:
@@ -118,8 +121,6 @@ def build_client(
         print(f'\n[MQTT] desconectado rc={rc} — reconectando automaticamente...')
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
-    client.username_pw_set(user, password)
-    client.tls_set()
     client.on_connect    = on_connect
     client.on_message    = on_message
     client.on_disconnect = on_disconnect
@@ -132,10 +133,8 @@ def main():
         description='AccuEnergy MQTT Ingestor → CSV',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument('--broker',     required=True,              help='Host HiveMQ Cloud (ex: abc.s2.eu.hivemq.cloud)')
-    ap.add_argument('--port',       type=int, default=8883,     help='Porta TLS')
-    ap.add_argument('--user',       required=True,              help='Usuário MQTT')
-    ap.add_argument('--password',   required=True,              help='Senha MQTT')
+    ap.add_argument('--broker',     default=_BROKER,            help='Host MQTT')
+    ap.add_argument('--port',       type=int, default=_PORT,    help='Porta MQTT')
     ap.add_argument('--output',     default='medicoes.csv',     help='CSV de saída (medições)')
     ap.add_argument('--harm',       default='harmonicas.csv',   help='CSV de saída (harmônicos); vazio=não gravar')
     ap.add_argument('--topic-med',  default='energia/medidor',  help='Tópico de medições')
@@ -147,7 +146,7 @@ def main():
     ingestor.open()
 
     client = build_client(
-        args.broker, args.port, args.user, args.password,
+        args.broker, args.port,
         args.topic_med, args.topic_harm, ingestor,
     )
     client.connect(args.broker, args.port, keepalive=60)

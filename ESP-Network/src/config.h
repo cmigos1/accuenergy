@@ -2,16 +2,19 @@
 #define CONFIG_H
 
 /* ── Wi-Fi ───────────────────────────────────────────────────────────────── */
-#define WIFI_SSID       "S23"
-#define WIFI_PASS       "Mqtt1234"
+#define WIFI_SSID       "AMANDA 2.4G"
+#define WIFI_PASS       "Am2026@10"
 
 /* ── MQTT broker ─────────────────────────────────────────────────────────── */
-#define MQTT_HOST       "b038913592104262bbc1d6c9c55f6a01.s1.eu.hivemq.cloud"   /* URL do cluster no HiveMQ Cloud */
-#define MQTT_PORT       8883
+#define MQTT_HOST       "192.168.1.91"   /* Mosquitto local */
+#define MQTT_PORT       1883
 #define MQTT_TOPIC      "energia/medidor"
 #define MQTT_CLIENT_ID  "esp32-developer"
-#define MQTT_USER       "accuenergy"
-#define MQTT_PASS       ">!wv;5Y9L4=h.ZX"
+
+/* ── Correção de hardware ──────────────────────────────────────────────────── */
+/* CT da fase 1 está fisicamente invertido no fio (não é possível reorientar nem
+   alterar o STM32). Negar Preal/Q/FP da fase 1 para leituras positivas. */
+#define PHASE1_CT_INVERTED  1
 
 /* ── NTP ─────────────────────────────────────────────────────────────────── */
 #define NTP_SERVER      "pool.ntp.org"
