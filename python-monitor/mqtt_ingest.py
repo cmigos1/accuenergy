@@ -18,7 +18,10 @@ import sys
 import paho.mqtt.client as mqtt
 
 # ── Broker local (Mosquitto) ──────────────────────────────────────────────────
-_BROKER = '127.0.0.1'
+# Mesmo IP que o ESP-Network usa (config.h). NÃO usar 127.0.0.1: se houver um
+# serviço Mosquitto preso em localhost, o ingest cai nesse broker vazio enquanto
+# o ESP publica no broker da interface de rede (0.0.0.0).
+_BROKER = '192.168.1.91'
 _PORT   = 1883
 
 CSV_HEADER = ['ts', 'vrms', 'irms', 'preal', 's', 'q', 'fp', 'kwh']
