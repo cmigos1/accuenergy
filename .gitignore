@@ -10,3 +10,7 @@ STM-Amostrador/.settings
 # Dados gravados em runtime (medições / harmônicos)
 *.csv
 *.h5
+
+# Helpers de deploy com credenciais hardcoded — nunca commitar
+python-monitor/_deploy_server.py
+python-monitor/_pubtest.py

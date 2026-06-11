@@ -14,14 +14,14 @@ import datetime
 import json
 import pathlib
 import sys
+import time
 
 import paho.mqtt.client as mqtt
 
-# ── Broker local (Mosquitto) ──────────────────────────────────────────────────
-# Mesmo IP que o ESP-Network usa (config.h). NÃO usar 127.0.0.1: se houver um
-# serviço Mosquitto preso em localhost, o ingest cai nesse broker vazio enquanto
-# o ESP publica no broker da interface de rede (0.0.0.0).
-_BROKER = '192.168.1.91'
+# ── Broker (Mosquitto no servidor dedicado .80) ───────────────────────────────
+# Mesmo IP que o ESP-Network usa (config.h). Quando o logger roda no próprio .80,
+# o start_logger.bat passa --broker 127.0.0.1 (loopback, sem firewall).
+_BROKER = '192.168.1.80'
 _PORT   = 1883
 
 CSV_HEADER = ['ts', 'vrms', 'irms', 'preal', 's', 'q', 'fp', 'kwh']
@@ -152,7 +152,19 @@ def main():
         args.broker, args.port,
         args.topic_med, args.topic_harm, ingestor,
     )
-    client.connect(args.broker, args.port, keepalive=60)
+    # Retry na conexão inicial: no boot do servidor o logger pode subir antes do
+    # broker bindar. Aguarda até ~2 min em vez de crashar.
+    for attempt in range(60):
+        try:
+            client.connect(args.broker, args.port, keepalive=60)
+            break
+        except (ConnectionRefusedError, OSError) as exc:
+            print(f'[MQTT] broker indisponível ({exc}); retry em 2s...')
+            time.sleep(2)
+    else:
+        print('[MQTT] não conectou ao broker; encerrando.')
+        ingestor.close()
+        return
 
     print(f'Gravando medições em: {args.output}')
     if harm_path:

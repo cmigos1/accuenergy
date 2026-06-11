@@ -327,7 +327,10 @@ static void mqtt_task(void *pvParams)
                 doc["kwh"]   = serialized(String(data->kwh,   6));
 
                 size_t len = serializeJson(doc, payload, 400u);
-                mqttClient.publish(MQTT_TOPIC, payload, len);
+                // Overload binário explícito + retain=false: telemetria de stream
+                // não deve ficar retida (senão novos subscribers recebem dado velho).
+                mqttClient.publish(MQTT_TOPIC, (const uint8_t *)payload,
+                                   (unsigned int)len, false);
             }
         }
 
@@ -360,7 +363,8 @@ static void mqtt_task(void *pvParams)
                 arrI.add(serialized(String(harmI[h], 4)));
             }
             size_t hlen = serializeJson(hdoc, hpayload, 1200u);
-            mqttClient.publish(MQTT_TOPIC_HARM, hpayload, hlen);
+            mqttClient.publish(MQTT_TOPIC_HARM, (const uint8_t *)hpayload,
+                               (unsigned int)hlen, false);
         }
 
         // Persiste kWh no LittleFS a cada KWH_SAVE_INTERVAL_MS

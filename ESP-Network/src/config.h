@@ -6,7 +6,7 @@
 #define WIFI_PASS       "Am2026@10"
 
 /* ── MQTT broker ─────────────────────────────────────────────────────────── */
-#define MQTT_HOST       "192.168.1.91"   /* Mosquitto local */
+#define MQTT_HOST       "192.168.1.80"   /* Mosquitto no servidor dedicado (.80) */
 #define MQTT_PORT       1883
 #define MQTT_TOPIC      "energia/medidor"
 #define MQTT_CLIENT_ID  "esp32-developer"
