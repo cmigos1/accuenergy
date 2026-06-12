@@ -24,9 +24,9 @@ import paho.mqtt.client as mqtt
 _BROKER = '192.168.1.80'
 _PORT   = 1883
 
-CSV_HEADER = ['ts', 'vrms', 'irms', 'preal', 's', 'q', 'fp', 'kwh']
+CSV_HEADER = ['ts', 'phase', 'vrms', 'irms', 'preal', 's', 'q', 'fp', 'kwh']
 HARM_HEADER = (
-    ['ts', 'thd_v', 'thd_i']
+    ['ts', 'phase', 'thd_v', 'thd_i']
     + [f'hv{i}' for i in range(1, 51)]
     + [f'hi{i}' for i in range(1, 51)]
 )
@@ -42,7 +42,26 @@ class Ingestor:
         self._w_harm: object  = None
         self._count = 0
 
+    @staticmethod
+    def _rotate_if_schema_changed(path: pathlib.Path, header: list):
+        """Se o arquivo existe com header diferente do atual, arquiva-o (rename
+        com timestamp) e deixa criar um novo. Evita misturar schemas no mesmo CSV
+        (ex.: quando a coluna 'phase' foi adicionada)."""
+        if not path.exists():
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                first = f.readline().rstrip('\r\n')
+            if first != ','.join(str(h) for h in header):
+                stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                archived = path.with_name(f"{path.stem}_{stamp}{path.suffix}")
+                path.rename(archived)
+                print(f"[schema] {path.name} arquivado como {archived.name}")
+        except OSError as exc:
+            print(f"[aviso] nao consegui rotacionar {path.name}: {exc}")
+
     def open(self):
+        self._rotate_if_schema_changed(self._csv_path, CSV_HEADER)
         new_main = not self._csv_path.exists()
         self._f_main = open(self._csv_path, 'a', newline='', encoding='utf-8')
         self._w_main = csv.writer(self._f_main)
@@ -50,6 +69,7 @@ class Ingestor:
             self._w_main.writerow(CSV_HEADER)
 
         if self._harm_path:
+            self._rotate_if_schema_changed(self._harm_path, HARM_HEADER)
             new_harm = not self._harm_path.exists()
             self._f_harm = open(self._harm_path, 'a', newline='', encoding='utf-8')
             self._w_harm = csv.writer(self._f_harm)
@@ -64,13 +84,23 @@ class Ingestor:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _absnum(x):
+        """abs() tolerante: o STM32 calcula Q = sqrt(S²−P²) (magnitude, sem
+        sinal). O sinal vinha só do CT invertido da fase 1 e não tem significado
+        físico — gravamos |Q| para ficar consistente entre as fases."""
+        try:
+            return abs(float(x))
+        except (TypeError, ValueError):
+            return x if x is not None else ''
+
     def handle_medidor(self, payload: dict):
         ts = payload.get('ts') or datetime.datetime.now(datetime.timezone.utc).isoformat()
         self._w_main.writerow([
-            ts,
+            ts, payload.get('phase', ''),
             payload.get('vrms', ''), payload.get('irms', ''),
             payload.get('preal', ''), payload.get('s', ''),
-            payload.get('q', ''),    payload.get('fp', ''),
+            self._absnum(payload.get('q')), payload.get('fp', ''),
             payload.get('kwh', ''),
         ])
         self._f_main.flush()
@@ -84,7 +114,8 @@ class Ingestor:
         thd_i = payload.get('thd_i', '')
         hv    = payload.get('harm_v') or [''] * 50
         hi    = payload.get('harm_i') or [''] * 50
-        self._w_harm.writerow([ts, thd_v, thd_i] + list(hv) + list(hi))
+        self._w_harm.writerow([ts, payload.get('phase', ''), thd_v, thd_i]
+                              + list(hv) + list(hi))
         self._f_harm.flush()
 
 

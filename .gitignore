@@ -11,6 +11,14 @@ STM-Amostrador/.settings
 *.csv
 *.h5
 
-# Helpers de deploy com credenciais hardcoded — nunca commitar
-python-monitor/_deploy_server.py
-python-monitor/_pubtest.py
+# Helpers de deploy/diagnostico (alguns com credenciais hardcoded) — nunca commitar
+python-monitor/_*.py
+
+# Cache do Python
+__pycache__/
+*.pyc
+
+# Settings do Claude Code — o allowlist registra comandos que podem conter
+# credenciais (ex.: senha SSH). Nao commitar.
+.claude/settings.json
+.claude/settings.local.json
