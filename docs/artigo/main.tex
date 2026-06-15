@@ -1,0 +1,654 @@
+\documentclass[12pt]{article}
+
+\usepackage{sbc-template}
+\usepackage{graphicx,url}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage{amsmath}
+\usepackage{placeins}
+
+% Ajuste de espaçamento de floats (recomendado SBC)
+\setlength{\textfloatsep}{8pt plus 2pt minus 4pt}
+\setlength{\floatsep}{8pt plus 2pt minus 4pt}
+\setlength{\intextsep}{8pt plus 2pt minus 4pt}
+
+\sloppy
+
+\title{Implanta\c{c}\~ao de Modelos NILM em Sistemas Embarcados de Baixo Custo}
+
+\author{Autor Um\inst{1}, Autor Dois\inst{1}}
+
+\address{Nome da Institui\c{c}\~ao\\
+  Endere\c{c}o -- Cidade -- Estado -- Brasil\\
+  \email{\{autor1, autor2\}@instituicao.br}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  This paper presents the architecture of a low-cost Non-Intrusive Load
+  Monitoring (NILM) system based on the Edge-to-Server paradigm. The proposed
+  system distributes the processing pipeline between an embedded sensor node
+  and a central server. At the edge, a hybrid architecture combining the
+  STM32H743 and ESP32 microcontrollers performs high-fidelity electrical
+  signal acquisition and feature extraction. Extracted features are transmitted
+  via MQTT protocol for machine learning-based disaggregation on the server
+  side. The approach overcomes inherent limitations of low-cost embedded
+  systems -- including ADC jitter and Wi-Fi interference -- enabling accurate
+  computation of active power and Total Harmonic Distortion.
+  Preliminary experiments on real residential data show that unsupervised
+  K-means clustering identifies appliance event signatures, but resolution
+  degrades as low-power events accumulate. A permutation null test reveals that
+  harmonic features, despite high-fidelity acquisition, provide no additional
+  discriminative information for event-based clustering in the evaluated
+  scenario.
+\end{abstract}
+
+\begin{resumo}
+  Este artigo apresenta a arquitetura de um sistema de Monitoramento N\~ao
+  Intrusivo de Cargas (NILM) de baixo custo relativo baseado no paradigma
+  \textit{Edge-to-Server}. O sistema proposto distribui o \textit{pipeline} de
+  processamento entre um n\'o sensor embarcado e um servidor central. Na borda,
+  uma arquitetura h\'ibrida composta pelos microcontroladores STM32H743 e ESP32
+  realiza a aquisi\c{c}\~ao de alta fidelidade e a extra\c{c}\~ao de
+  caracter\'isticas dos sinais el\'etricos. As caracter\'isticas extra\'idas
+  s\~ao transmitidas via protocolo MQTT para desagrega\c{c}\~ao por modelos de
+  aprendizado de m\'aquina no servidor. A abordagem supera limita\c{c}\~oes
+  inerentes a \textit{hardwares} embarcados de baixo custo, como \textit{jitter}
+  no ADC e interfer\^encia do Wi-Fi, viabilizando o c\'alculo preciso de
+  pot\^encia e Distor\c{c}\~ao Harm\^onica Total.
+  Experimentos preliminares em ambiente residencial real mostram que o
+  agrupamento K-means identifica assinaturas de eventos de carga, mas a
+  resolu\c{c}\~ao fina se degrada com o ac\'umulo de eventos de baixa pot\^encia.
+  Um teste de nulidade por permuta\c{c}\~ao revela que as caracter\'isticas
+  harm\^onicas n\~ao agregam informa\c{c}\~ao discriminativa ao agrupamento
+  baseado em eventos no cen\'ario avaliado.
+
+  \textbf{Palavras-chave:} NILM, sistemas embarcados, \textit{Edge-to-Server},
+  aprendizado de m\'aquina, monitoramento n\~ao intrusivo de energia.
+\end{resumo}
+
+
+\section{Introdu\c{c}\~ao}
+
+A crescente demanda por efici\^encia energ\'etica e a necessidade de redu\c{c}\~ao
+do consumo de eletricidade impulsionam o desenvolvimento de tecnologias de
+monitoramento inteligente \cite{ref2,ref6}. Tradicionalmente, o Monitoramento
+Intrusivo de Cargas (ILM -- \textit{Intrusive Load Monitoring}) exige a
+instala\c{c}\~ao de sensores dedicados para cada equipamento \cite{ref1,ref2}.
+Essa abordagem resulta em altos custos e expressiva complexidade de
+infraestrutura \cite{ref2,ref3}. Nesse cen\'ario, o Monitoramento N\~ao Intrusivo de
+Cargas (NILM -- \textit{Non-Intrusive Load Monitoring}) configura-se como uma
+alternativa vi\'avel e escal\'avel \cite{ref1,ref6}. Essa tecnologia \'e capaz de
+desagregar o consumo total de uma instala\c{c}\~ao el\'etrica e estimar o consumo
+individual de cada aparelho a partir de um \'unico ponto de medi\c{c}\~ao
+\cite{ref1}.
+
+Apesar dos avan\c{c}os dos algoritmos de aprendizado de m\'aquina e reconhecimento
+de padr\~oes aplicados ao NILM, grande parte da literatura reporta depend\^encia
+de \textit{hardware} de medi\c{c}\~ao de alto custo na borda \cite{ref6,ref7}. A
+transi\c{c}\~ao parcial desses processamentos para o modelo
+\textit{Edge-to-Server}, utilizando n\'os sensores baseados em sistemas embarcados
+h\'ibridos de baixo custo relativo, apresenta um desafio de engenharia
+significativo. Observa\c{c}\~oes emp\'iricas demonstram que as restri\c{c}\~oes
+inerentes a dispositivos de recursos restritos -- tais como limita\c{c}\~oes na
+taxa de amostragem, estabilidade do conversor anal\'ogico-digital (ADC) e
+concorr\^encia com rotinas de comunica\c{c}\~ao Wi-Fi -- exigem uma arquitetura
+cuidadosa para extra\c{c}\~ao de caracter\'isticas com alta fidelidade
+\cite{ref8}.
+
+Neste contexto, o presente artigo tem como objetivo introduzir e fundamentar a
+arquitetura de um sistema NILM \textit{Edge-to-Server} de baixo custo relativo.
+O foco central recai sobre a distribui\c{c}\~ao do \textit{pipeline} de
+processamento: a extra\c{c}\~ao rigorosa de caracter\'isticas na borda
+(\textit{feature engineering}) para contornar as limita\c{c}\~oes de banda, e a
+delega\c{c}\~ao do processamento de \textit{Machine Learning} intensivo para
+servidores em nuvem ou locais.
+
+Este artigo est\'a organizado em sete se\c{c}\~oes, incluindo esta introdu\c{c}\~ao.
+A Se\c{c}\~ao~2 apresenta o referencial te\'orico sobre NILM, seus algoritmos de
+desagrega\c{c}\~ao e o paradigma \textit{Edge-to-Server}. A Se\c{c}\~ao~3 detalha
+a arquitetura de \textit{hardware} e sensoriamento do sistema proposto. A
+Se\c{c}\~ao~4 descreve a infraestrutura de servidor e o \textit{pipeline} de
+aquisi\c{c}\~ao de dados. A Se\c{c}\~ao~5 apresenta a metodologia de
+desagrega\c{c}\~ao por aprendizado de m\'aquina. A Se\c{c}\~ao~6 discute os
+resultados preliminares obtidos em ambiente residencial real. Por fim, a
+Se\c{c}\~ao~7 apresenta as considera\c{c}\~oes finais e os pr\'oximos passos.
+
+
+\section{Referencial Te\'orico}
+
+\subsection{Fundamentos do Monitoramento N\~ao Intrusivo de Cargas (NILM)}
+
+O conceito de NILM foi introduzido pioneiramente por George W. Hart no in\'icio da
+d\'ecada de 1990 \cite{ref1}. O princ\'ipio elementar do m\'etodo consiste em
+monitorar as formas de onda de tens\~ao e corrente no ramal de entrada de energia
+(quadro de distribui\c{c}\~ao) e, mediante a an\'alise dessas medi\c{c}\~oes
+agregadas, inferir as transi\c{c}\~oes de estado (ligar/desligar) e o consumo
+cont\'inuo dos aparelhos conectados a jusante \cite{ref1}.
+
+O \textit{pipeline} cl\'assico de um sistema NILM \'e estruturado em quatro etapas
+fundamentais \cite{ref2,ref7}:
+
+\begin{enumerate}
+  \item \textbf{Aquisi\c{c}\~ao de Dados:} Medi\c{c}\~ao cont\'inua dos sinais
+  el\'etricos. Pode ser dividida em abordagens de baixa frequ\^encia \cite{ref3}
+  e alta frequ\^encia.
+
+  \item \textbf{Detec\c{c}\~ao de Eventos:} Processo de varredura do sinal para
+  identifica\c{c}\~ao de varia\c{c}\~oes bruscas que indicam a mudan\c{c}a de
+  estado operacional de um equipamento \cite{ref2}.
+
+  \item \textbf{Extra\c{c}\~ao de Caracter\'isticas (\textit{Feature
+  Extraction}):} Transforma\c{c}\~ao dos sinais brutos em assinaturas el\'etricas
+  \'unicas para cada equipamento \cite{ref2}. Inclui o c\'alculo de saltos de
+  pot\^encia, an\'alise da trajet\'oria V-I, e quantifica\c{c}\~ao do conte\'udo
+  harm\^onico mediante a Distor\c{c}\~ao Harm\^onica Total (DHT;
+  $THD$ na nota\c{c}\~ao internacional) \cite{ref8}.
+
+  \item \textbf{Classifica\c{c}\~ao e Desagrega\c{c}\~ao:} Emprego de algoritmos
+  matem\'aticos ou modelos computacionais para associar as caracter\'isticas
+  extra\'idas a uma classe de equipamento mapeada em um banco de dados pr\'evio
+  \cite{ref4,ref6}.
+\end{enumerate}
+
+\subsection{Modelagem e Algoritmos de Desagrega\c{c}\~ao}
+
+O n\'ucleo de intelig\^encia de um sistema NILM reside em seu algoritmo de
+desagrega\c{c}\~ao. As arquiteturas de modelagem evolu\'iram de abordagens
+heur\'isticas para modelos avan\c{c}ados baseados em Intelig\^encia Artificial
+\cite{ref4}.
+
+Historicamente, modelos estat\'isticos como os \textbf{Modelos Ocultos de Markov
+Fatoriais (FHMM)} e t\'ecnicas de \textbf{Otimiza\c{c}\~ao Combinat\'oria}
+dominaram a literatura \cite{ref2,ref3,ref4}. Com a consolida\c{c}\~ao do aprendizado de
+m\'aquina, algoritmos supervisionados e baseados em dist\^ancias -- como
+\textbf{K-Nearest Neighbors (KNN)}, \textbf{Support Vector Machines (SVM)} e
+\textbf{Random Forests} -- ganharam espa\c{c}o devido \`a efic\'acia na
+classifica\c{c}\~ao de assinaturas estacion\'arias com custo computacional moderado
+\cite{ref6}.
+
+A arquitetura do tipo sequ\^encia-para-ponto foi introduzida na literatura como um
+marco estrutural para esses modelos computacionais \cite{ref5}. Nos \'ultimos anos,
+t\'ecnicas de \textit{Deep Learning}, em especial \textbf{Redes Neurais
+Convolucionais (CNNs)} e redes recorrentes como \textbf{Long Short-Term Memory
+(LSTM)}, t\^em sido aplicadas com sucesso nessa arquitetura, definindo o estado da
+arte para desagrega\c{c}\~ao \cite{ref7}. Embora altamente precisas, estas
+abordagens exigem consider\'avel capacidade de processamento, o que imp\~oe uma
+forte barreira para sua implementa\c{c}\~ao direta em microcontroladores de
+prop\'osito geral \cite{ref7}.
+
+\subsection{Pr\'e-processamento na Borda e Integra\c{c}\~ao Edge-to-Server}
+
+A arquitetura \textit{Edge-to-Server} divide a carga computacional entre o n\'o
+sensor (borda) e o servidor central. Em vez de executar infer\^encias pesadas no
+microcontrolador, o foco na borda passa a ser a aquisi\c{c}\~ao robusta e o
+pr\'e-processamento para extra\c{c}\~ao de \textit{features}, garantindo a
+viabilidade de rede e de custo operacional.
+
+\textbf{Limita\c{c}\~oes de Sensoriamento e Condicionamento:} A utiliza\c{c}\~ao
+de Conversores Anal\'ogico-Digitais integrados requer metodologias rigorosas.
+Testes pr\'aticos indicam que \'e necess\'ario isolar as rotinas cr\'iticas para
+superar o alto \textit{jitter} de comunica\c{c}\~ao \cite{ref8}. A convers\~ao
+anal\'ogico-digital (ADC) nativa em microcontroladores como o ESP32 apresenta
+limita\c{c}\~oes intr\'insecas ao hardware associadas ao tempo de processamento de
+aproxima\c{c}\~ao sucessiva (SAR). O microcontrolador ESP32 possui dois ADCs, por\'em
+o ADC2 possui limita\c{c}\~oes de uso conjunto com o Wi-Fi, obrigando o sistema a
+utilizar apenas o ADC1 para processar m\'ultiplos canais e, por consequ\^encia,
+dobrando o tempo de processamento das amostras \cite{ref8}.
+
+\textbf{Engenharia de Caracter\'isticas (\textit{Feature Engineering}):} O
+microcontrolador realiza c\'alculos matem\'aticos densos localmente para evitar a
+transmiss\~ao cont\'inua de ondas em alta frequ\^encia. Para assegurar precis\~ao
+no c\'alculo da pot\^encia ativa e da Distor\c{c}\~ao Harm\^onica Total (DHT) por
+meio da Transformada Discreta de Fourier, o ciclo de amostragem deve ser um
+m\'ultiplo do per\'iodo da frequ\^encia fundamental, adotando-se de forma
+recorrente um ciclo de 50ms. A placa extrai as assinaturas el\'etricas reduzindo
+pacotes de megabytes para alguns kilobytes por segundo.
+
+\textbf{Desagrega\c{c}\~ao em Servidor:} Uma vez que as \textit{features} s\~ao
+transmitidas ao servidor, eliminam-se as restri\c{c}\~oes de mem\'oria RAM e de
+processamento. Isso viabiliza o uso tanto de algoritmos cl\'assicos otimizados
+\cite{ref6} quanto de abordagens baseadas em \textit{Deep Learning} no ambiente
+servidor \cite{ref7}.
+
+Desta forma, a viabilidade de um modelo NILM funcional em hardware de baixo custo
+relativo recai sobre a qualidade e precis\~ao das abstra\c{c}\~oes de
+caracter\'isticas el\'etricas na borda.
+
+
+\section{Arquitetura do Sistema Proposto}
+
+Motivado por esse contexto, esta se\c{c}\~ao detalha as decis\~oes de engenharia e
+a arquitetura adotada para a concep\c{c}\~ao do medidor inteligente. O projeto foi
+guiado pela necessidade de conciliar a extra\c{c}\~ao de m\'etricas el\'etricas de
+alta fidelidade com as restri\c{c}\~oes de processamento, mem\'oria e custo de
+sistemas embarcados comerciais.
+
+\subsection{Arquitetura Edge-to-Server}
+
+O sistema foi concebido sob o paradigma \textit{Edge-to-Server}, onde a aquisi\c{c}\~ao
+prim\'aria e o pr\'e-processamento ocorrem localmente, enquanto os dados s\~ao
+transmitidos para um servidor para desdobramento do modelo NILM. Essa abordagem
+otimiza o uso da rede. O fluxo de dados passa pelos est\'agios de sensoriamento,
+condicionamento, processamento embarcado e comunica\c{c}\~ao.
+
+\subsection{Arquitetura de Hardware e Sensoriamento}
+
+Para garantir um monitoramento n\~ao intrusivo, optou-se pela utiliza\c{c}\~ao de
+sensores que n\~ao requerem seccionamento da fia\c{c}\~ao original.
+
+\subsubsection{Sensoriamento de Corrente e Tens\~ao}
+
+A medi\c{c}\~ao de corrente \'e realizada pelo Transformador de Corrente (TC)
+\textbf{SCT-013}, do tipo n\'ucleo dividido. Para a medi\c{c}\~ao de tens\~ao,
+adotou-se o transformador de potencial isolador \textbf{ZMPT101B}. Devido a
+limita\c{c}\~oes f\'isicas inerentes aos transdutores, os sinais condicionados
+apresentam defasagem em rela\c{c}\~ao aos sinais originais e tamb\'em entre si.
+Para executar c\'alculos realistas da pot\^encia e fator de pot\^encia, \'e imperativo
+corrigir tal defasagem deslocando o vetor completo do sinal da corrente por uma
+quantidade calculada de amostras em rela\c{c}\~ao ao vetor de tens\~ao.
+
+Durante a fase de valida\c{c}\~ao, identificou-se que os m\'odulos comerciais
+baseados no ZMPT101B introduziam distor\c{c}\~oes harm\^onicas indesejadas e
+causavam defasagem angular no sinal medido. Como solu\c{c}\~ao, optou-se por
+utilizar o componente ZMPT101B isolado (\textit{standalone}), implementando-se um
+circuito condicionador passivo e customizado.
+
+\subsubsection{Processamento H\'ibrido com STM32H743 e ESP32}
+
+A concep\c{c}\~ao inicial previa a utiliza\c{c}\~ao exclusiva do microcontrolador
+ESP32 para amostragem (via ADC nativo) e comunica\c{c}\~ao. Entretanto, as
+interrup\c{c}\~oes geradas pelo \textit{stack} de comunica\c{c}\~ao Wi-Fi no ESP32
+causavam varia\c{c}\~oes temporais (\textit{jitter}) severas na amostragem.
+
+A an\'alise das capacidades do ESP32 demonstra que o temporizador de alta
+resolu\c{c}\~ao (\textit{High-Resolution Timer} -- HRT) pode possuir um per\'iodo
+m\'inimo de $50\,\mu\text{s}$ (te\'oricos 20\,kHz), mas em aplica\c{c}\~oes de mundo
+real a tentativa de utilizar taxas t\~ao altas aciona o temporizador vigia
+(\textit{watchdog timer}) do sistema \cite{ref8}. Nos ensaios experimentais, a
+amostragem de um \'unico canal estabilizou-se na marca de $80\,\mu\text{s}$. Como o
+projeto exigiu a medi\c{c}\~ao paralela de dois canais alocados apenas no ADC1,
+estabeleceu-se a taxa de amostragem vi\'avel em $200\,\mu\text{s}$ (5\,kHz) para
+garantir a estabilidade. Embora o ciclo de 5\,kHz permita a obten\c{c}\~ao de 250
+amostras por canal em 50\,ms (suficiente para o c\'alculo at\'e a 41\textordfeminine~harm\^onica),
+o compartilhamento de processamento com o m\'odulo de r\'adio permanecia como um
+gargalo estrutural \cite{ref8}.
+
+Para superar esse desafio, a arquitetura foi redesenhada para um modelo h\'ibrido:
+
+\begin{enumerate}
+  \item \textbf{STM32H743 (Processamento de Sinal):} Selecionado pelo seu ADC de
+  alta resolu\c{c}\~ao e capacidade superior de \textit{Digital Signal Processing}
+  (DSP). Este microcontrolador atua dedicado exclusivamente \`a aquisi\c{c}\~ao
+  ininterrupta e de alta fidelidade das formas de onda de tens\~ao e corrente,
+  realizando o c\'alculo local das grandezas el\'etricas.
+
+  \item \textbf{ESP32 (Comunica\c{c}\~ao):} Atua como m\'odulo de conectividade
+  Wi-Fi e gerenciador de pacotes. O dispositivo assume exclusivamente a
+  integra\c{c}\~ao de rede, transmitindo os indicadores como pot\^encia ativa e
+  DHT consolidados para a infraestrutura via protocolo MQTT
+  (\textit{Message Queuing Telemetry Transport}).
+\end{enumerate}
+
+O fluxo de dados entre o STM32H743 e o ESP32 \'e realizado via barramento serial
+UART (\textit{Universal Asynchronous Receiver-Transmitter}). Como as rotinas de
+amostragem pesadas foram transferidas para o STM32 e apenas as vari\'aveis
+calculadas s\~ao transmitidas ao ESP32, a largura de banda da comunica\c{c}\~ao
+serial mostrou-se perfeitamente adequada.
+
+
+\section{Infraestrutura de Servidor e \textit{Pipeline} de Aquisi\c{c}\~ao}
+
+Com o n\'o de borda configurado conforme descrito na se\c{c}\~ao anterior, a camada
+de servidor materializa a por\c{c}\~ao \textit{server} do paradigma
+\textit{Edge-to-Server}. O n\'o ESP32 publica as caracter\'isticas calculadas
+via protocolo MQTT em um \textit{broker} Mosquitto hospedado em um servidor
+dedicado, fisicamente distinto da esta\c{c}\~ao de desenvolvimento. Essa
+separa\c{c}\~ao garante que a aquisi\c{c}\~ao permane\c{c}a cont\'inua e
+independente do ambiente de an\'alise.
+
+A comunica\c{c}\~ao \'e organizada em dois t\'opicos: \texttt{energia/medidor},
+que transporta as grandezas el\'etricas consolidadas por ciclo, e
+\texttt{energia/harmonicas}, que transporta o espectro harm\^onico. Um processo
+assinante (\textit{ingestor}) persiste cada mensagem em arquivos CSV
+(\textit{Comma-Separated Values}) sequenciais, formando a base de dados de
+treinamento. Tanto o \textit{broker} quanto o \textit{ingestor} s\~ao executados como
+servi\c{c}os resilientes, com in\'icio autom\'atico na inicializa\c{c}\~ao do sistema
+e rein\'icio autom\'atico em caso de falha, assegurando registro ininterrupto.
+
+Cada mensagem de medi\c{c}\~ao agrega, por fase: tens\~ao e corrente eficazes
+($V_{rms}$, $I_{rms}$), pot\^encia ativa ($P$), pot\^encia reativa ($Q$),
+pot\^encia aparente ($S$), fator de pot\^encia (FP) e energia acumulada (kWh).
+As mensagens harm\^onicas carregam a Distor\c{c}\~ao Harm\^onica Total de tens\~ao
+e corrente ($THD_V$ e $THD_I$, conforme nota\c{c}\~ao definida na Se\c{c}\~ao~2) e
+a magnitude das 50 primeiras componentes harm\^onicas de tens\~ao e de corrente.
+
+\begin{figure}[ht]
+  \centering
+  \fbox{\parbox[c][4cm][c]{0.85\linewidth}{\centering \textit{[Espa\c{c}o
+  reservado para figura: diagrama do fluxo de dados
+  STM32H743 $\rightarrow$ ESP32 $\rightarrow$ \textit{broker} MQTT
+  $\rightarrow$ \textit{ingestor} $\rightarrow$ base de dados CSV.]}}}
+  \caption{Fluxo de dados da arquitetura \textit{Edge-to-Server}.}
+  \label{fig:pipeline}
+\end{figure}
+\FloatBarrier
+
+
+\section{Metodologia de Desagrega\c{c}\~ao por Aprendizado de M\'aquina}
+
+De posse das caracter\'isticas adquiridas e persistidas conforme descrito na
+se\c{c}\~ao anterior, a desagrega\c{c}\~ao no servidor segue uma abordagem
+orientada a eventos combinada com aprendizado n\~ao supervisionado, adequada a
+cen\'arios reais em que n\~ao h\'a controle expl\'icito sobre as cargas
+conectadas.
+
+\subsection{Conjunto de Caracter\'isticas}
+
+O vetor de caracter\'isticas associado a cada evento \'e composto pelas
+varia\c{c}\~oes das grandezas de regime permanente -- com destaque para os
+saltos de pot\^encia ativa ($\Delta P$) e reativa ($\Delta Q$) -- e,
+opcionalmente, pelo conte\'udo harm\^onico ($THD_V$, $THD_I$ e harm\^onicas
+dominantes). A disponibilidade do espectro harm\^onico pode, em tese,
+fornecer uma assinatura adicional discriminativa para cargas n\~ao lineares,
+cujo perfil difere de cargas resistivas (pr\'oximas da senoidal);
+sua contribui\c{c}\~ao efetiva \'e avaliada empiricamente na Se\c{c}\~ao~6.
+
+\subsection{Detec\c{c}\~ao de Eventos}
+
+A detec\c{c}\~ao de eventos emprega o princ\'ipio cl\'assico de Hart \cite{ref1}:
+uma linha de base m\'ovel acompanha o regime permanente, e uma transi\c{c}\~ao
+\'e registrada quando a pot\^encia ativa apresenta um degrau superior a um limiar
+configur\'avel, sustentado por um n\'umero m\'inimo de amostras consecutivas. O
+processamento \'e realizado de forma independente por fase. Cargas que n\~ao
+produzem degraus discretos -- discutidas na Se\c{c}\~ao de resultados -- s\~ao
+tratadas de forma complementar.
+
+\subsection{Agrupamento N\~ao Supervisionado de Assinaturas}
+
+Os eventos detectados s\~ao agrupados por meio do algoritmo \textbf{K-means} no
+espa\c{c}o de caracter\'isticas. O n\'umero de \textit{clusters} $K$ \'e
+selecionado automaticamente pelo coeficiente de \textbf{silhueta}, que quantifica
+a coes\~ao interna e a separa\c{c}\~ao entre grupos sem necessidade de
+r\'otulos pr\'evios. Cada \textit{cluster} corresponde a uma assinatura
+el\'etrica recorrente, candidata a um aparelho ou estado operacional.
+
+\subsection{Rotulagem a Posteriori e Classifica\c{c}\~ao Semissupervisionada}
+
+Diferentemente de abordagens totalmente supervisionadas, a rotulagem \'e
+realizada \textit{a posteriori}: ap\'os a forma\c{c}\~ao dos \textit{clusters},
+cada grupo \'e interpretado quanto \`a sua plausibilidade f\'isica
+(magnitude de $\Delta P$, sinal de $\Delta Q$, assinatura harm\^onica) e
+associado a um aparelho quando h\'a evid\^encia suficiente. Em ambientes n\~ao
+controlados, essa rotulagem \'e necessariamente parcial e oportunista: grupos
+amb\'iguos s\~ao mantidos como ``desconhecidos''. Os r\'otulos resultantes
+alimentam classificadores supervisionados cl\'assicos -- \textbf{KNN}, \textbf{SVM}
+e \textbf{Random Forest} -- avaliados por valida\c{c}\~ao cruzada estratificada,
+configurando um esquema semissupervisionado em que o reconhecedor \'e treinado
+sobre as assinaturas descobertas.
+
+\subsection{Estudo de Abla\c{c}\~ao}
+
+Para mensurar a contribui\c{c}\~ao das caracter\'isticas harm\^onicas, aplica-se
+um \textbf{teste de nulidade por permuta\c{c}\~ao}: a qualidade do agrupamento
+(coeficiente de silhueta) obtida com as caracter\'isticas harm\^onicas reais \'e
+comparada \`a obtida com essas mesmas caracter\'isticas \textbf{embaralhadas} --
+quebrando o v\'inculo evento--harm\^onico. Se a estrutura harm\^onica fosse
+discriminativa, a silhueta com dados reais deveria superar a embaralhada de forma
+consistente. O teste \'e aplicado separadamente a dois conjuntos de
+\textit{features}: (i)~apenas pot\^encias ($\Delta P$, $\Delta Q$) como linha de
+base; (ii)~pot\^encias acrescidas do conte\'udo harm\^onico, tanto em termos
+absolutos (THD e harm\^onicas no instante do evento) quanto em varia\c{c}\~ao
+($\Delta$harm\^onico, p\'os menos pr\'e-evento). A diferen\c{c}a de silhueta entre
+real e embaralhado quantifica o ganho real proporcionado pela aquisi\c{c}\~ao de
+alta fidelidade na borda.
+
+
+\section{Resultados Preliminares e Discuss\~ao}
+
+Os resultados reportados nesta se\c{c}\~ao s\~ao preliminares e baseiam-se em
+coleta cont\'inua em ambiente residencial real, em andamento. Por se tratar de um
+cen\'ario n\~ao controlado, a quantidade de eventos por classe depende do uso
+natural dos aparelhos ao longo do tempo.
+
+\subsection{Evolu\c{c}\~ao Temporal e Dilui\c{c}\~ao por Cargas de Baixa
+Pot\^encia}
+
+Para avaliar a robustez da descoberta n\~ao supervisionada, o agrupamento sobre
+($\Delta P$, $\Delta Q$) foi repetido em janelas de coleta crescentes (de 12 a
+48~horas; limiar de detec\c{c}\~ao de 50~W). A Figura~\ref{fig:clusters1d2d}
+contrasta os dois extremos.
+
+Com \textbf{um dia} de coleta (727 eventos), o K-means resolve $K=10$
+\textit{clusters} aparentes, com diversos aparelhos de pot\^encia m\'edia surgindo
+como grupos distintos. Contudo, o coeficiente de silhueta correspondente \'e baixo
+(0{,}44), indicando \textbf{sobre-segmenta\c{c}\~ao}: a estrutura fina n\~ao \'e
+estatisticamente robusta. Com \textbf{dois dias} (1270 eventos), o $K$ \'otimo
+\textbf{colapsa para 3} (silhueta 0{,}74): um \'unico \textit{cluster} dominante de
+eventos de baixa pot\^encia, somado aos dois extremos -- o motor de
+$\approx$2{,}3~kW (alto $\Delta Q$) e as cargas resistivas de alta pot\^encia. Os
+grupos de pot\^encia m\'edia, separ\'aveis em um dia, foram \textbf{absorvidos}
+pela massa de baixa pot\^encia.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\linewidth]{figuras/clusters_1d2d.png}
+  \caption{Eventos no plano $\Delta P \times \Delta Q$. Com um dia (esquerda) o
+  K-means resolve dez grupos (silhueta 0{,}44, sobre-segmenta\c{c}\~ao); com dois
+  dias (direita) a massa de baixa pot\^encia domina e o agrupamento colapsa para
+  tr\^es (silhueta 0{,}74).}
+  \label{fig:clusters1d2d}
+\end{figure}
+
+O mecanismo \'e a \textbf{dilui\c{c}\~ao por cargas de baixa pot\^encia}. Cerca de
+85\% de todos os eventos s\~ao degraus de baixa pot\^encia ($|\Delta P| < 150$~W)
+originados de cargas continuamente vari\'aveis (o compressor \textit{inverter}) e
+do ru\'ido de medi\c{c}\~ao. Conforme a coleta avan\c{c}a, esses eventos se
+acumulam (de 361 para 1101 -- Figura~\ref{fig:degradacao}) e a qualidade da
+resolu\c{c}\~ao fina (silhueta com $K$ fixo em 8) decai de 0{,}46 para 0{,}41. A
+massa de baixa pot\^encia cresce at\'e dominar o espa\c{c}o de caracter\'isticas, e
+o crit\'erio de silhueta passa a favorecer o agrupamento grosseiro.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.8\linewidth]{figuras/degradacao.png}
+  \caption{Degrada\c{c}\~ao da resolu\c{c}\~ao fina (silhueta com $K=8$, eixo
+  esquerdo) conforme os eventos de baixa pot\^encia se acumulam (eixo direito) ao
+  longo da coleta.}
+  \label{fig:degradacao}
+\end{figure}
+
+Conclui-se que a aparente riqueza de aparelhos observada com um dia de dados
+\textbf{n\~ao \'e robusta}: trata-se de sobre-segmenta\c{c}\~ao de um espa\c{c}o de
+caracter\'isticas de baixa rela\c{c}\~ao sinal-ru\'ido, dominado por eventos de
+baixa pot\^encia n\~ao resol\'uveis. Apenas as cargas de maior pot\^encia
+permanecem separ\'aveis de forma est\'avel -- limita\c{c}\~ao consistente com as
+restri\c{c}\~oes de sensoriamento (n\~ao-linearidade do SCT-013 em baixa corrente
+e erro de fase dos transdutores) discutidas a seguir.
+
+\begin{figure}[ht]
+  \centering
+  \fbox{\parbox[c][5cm][c]{0.85\linewidth}{\centering \textit{[Espa\c{c}o
+  reservado para figura: matriz de confus\~ao do melhor classificador e
+  gr\'afico comparativo do estudo de abla\c{c}\~ao (P+Q \textit{vs.}
+  P+Q+harm\^onicas) por algoritmo.]}}}
+  \caption{Desempenho de classifica\c{c}\~ao e estudo de abla\c{c}\~ao.}
+  \label{fig:resultados}
+\end{figure}
+
+As m\'etricas quantitativas (\textit{F1-macro}, precis\~ao e revoca\c{c}\~ao por
+classe), bem como o n\'umero final de eventos e classes, ser\~ao consolidadas
+ap\'os o encerramento da coleta. [Espa\c{c}o reservado para tabela de
+m\'etricas.]
+
+\subsection{Avalia\c{c}\~ao das Caracter\'isticas Harm\^onicas}
+
+A aquisi\c{c}\~ao harm\^onica de alta fidelidade \'e um diferencial da arquitetura
+na borda; sua contribui\c{c}\~ao para a desagrega\c{c}\~ao, por\'em, foi avaliada de
+forma rigorosa, e o resultado \'e nulo neste cen\'ario -- o que constitui, em si,
+um achado relevante.
+
+Aplicou-se um \textbf{teste de nulidade} por permuta\c{c}\~ao: compara-se a silhueta
+do agrupamento com as caracter\'isticas harm\^onicas reais contra a mesma
+clusteriza\c{c}\~ao com essas caracter\'isticas \textbf{embaralhadas} (quebrando o
+v\'inculo evento--harm\^onico). Se a estrutura fosse real, a silhueta com dados
+reais superaria a embaralhada. Para o conte\'udo harm\^onico \textbf{absoluto}
+(THD e harm\^onicas no instante do evento), a silhueta real (0{,}194) foi
+praticamente id\^entica \`a embaralhada (0{,}191) -- ambas muito acima de dados
+puramente aleat\'orios (0{,}051). Ou seja, existe estrutura, mas ela prov\'em de
+$\Delta P$/$\Delta Q$, n\~ao dos harm\^onicos.
+
+A an\'alise foi refeita com a \textbf{varia\c{c}\~ao} harm\^onica
+($\Delta$harm\^onico, p\'os menos pr\'e-evento, an\'aloga a $\Delta P$), que isola a
+assinatura do aparelho chaveado. Como mostra a Figura~\ref{fig:ablacao}, acrescentar
+o $\Delta$harm\^onico \`as pot\^encias n\~ao apenas falha em melhorar, como
+\textbf{degrada} a silhueta (de 0{,}43 para 0{,}14); e o valor real (0{,}139)
+novamente coincide com o embaralhado (0{,}122).
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.7\linewidth]{figuras/ablacao_harmonicos.png}
+  \caption{Teste de nulidade das caracter\'isticas harm\^onicas. A silhueta com
+  $\Delta$harm\^onico real \'e estatisticamente igual \`a obtida com os mesmos
+  valores embaralhados, e inferior \`a base $\Delta P$/$\Delta Q$ -- evid\^encia de
+  que os harm\^onicos n\~ao agregam informa\c{c}\~ao discriminativa ao agrupamento.}
+  \label{fig:ablacao}
+\end{figure}
+
+Conclui-se que, neste \textit{setup}, os harm\^onicos -- absolutos ou em
+varia\c{c}\~ao -- n\~ao carregam informa\c{c}\~ao \'util ao agrupamento de eventos.
+As causas prov\'aveis s\~ao: (i)~o n\'ivel harm\^onico absoluto \'e dominado pela
+assinatura de fundo da resid\^encia (cargas sempre-ligadas), e n\~ao pela carga que
+chaveou; (ii)~a maioria dos eventos \'e de baixa pot\^encia, pr\'oxima ao piso de
+ru\'ido, onde a medi\c{c}\~ao harm\^onica \'e pouco confi\'avel; e
+(iii)~limita\c{c}\~oes de sensoriamento -- a resposta em alta frequ\^encia do
+SCT-013 e a distor\c{c}\~ao residual do condicionamento de tens\~ao podem fazer o
+harm\^onico medido refletir mais o sensor do que a carga. O achado n\~ao invalida o
+uso de harm\^onicos em NILM, mas indica que sua explora\c{c}\~ao exigiria
+sele\c{c}\~ao supervisionada de caracter\'isticas e/ou melhoria do condicionamento
+-- direcionamentos para trabalho futuro.
+
+\subsection{Desafios e An\'alise de Erro}
+
+A coleta em ambiente n\~ao controlado introduz fontes de erro que constituem, por
+si s\'o, um resultado relevante e s\~ao discutidas a seguir.
+
+\textbf{Cargas continuamente vari\'aveis.} Aparelhos com acionamento por
+\textit{inversor de frequ\^encia} -- como refrigeradores modernos -- n\~ao
+desligam o compressor, mas modulam continuamente sua velocidade. Tais cargas
+correspondem ao Tipo~IV da taxonomia de Hart e da literatura moderna \cite{ref1,ref7} e n\~ao
+produzem degraus discretos de liga/desliga, n\~ao sendo capturadas pela detec\c{c}\~ao
+de eventos convencional. Sua identifica\c{c}\~ao depende da assinatura de regime
+permanente e, sobretudo, do perfil harm\^onico do est\'agio retificador do
+inversor -- o que refor\c{c}a a relev\^ancia da aquisi\c{c}\~ao harm\^onica na
+borda.
+
+\textbf{Natureza da pot\^encia reativa.} A pot\^encia reativa \'e calculada na
+borda como $Q = \sqrt{S^2 - P^2}$, isto \'e, como magnitude n\~ao sinalizada. O
+sinal observado decorre exclusivamente de conven\c{c}\~ao de medi\c{c}\~ao
+(orienta\c{c}\~ao do transformador de corrente) e n\~ao distingue cargas
+indutivas de capacitivas; adota-se, portanto, o valor absoluto $|Q|$ como
+caracter\'istica.
+
+\textbf{Rotulagem incerta.} Sem controle das cargas, parte das assinaturas n\~ao
+pode ser atribu\'ida a um aparelho com certeza. Casos de rotulagem incorreta s\~ao
+documentados e atribu\'idos a causas espec\'ificas -- sobreposi\c{c}\~ao de
+assinaturas de pot\^encia semelhante, eventos simult\^aneos somados em um \'unico
+degrau, presen\c{c}a de cargas cont\'inuas e ru\'ido de medi\c{c}\~ao --,
+constituindo a an\'alise de erro do trabalho. A valida\c{c}\~ao recorre a
+m\'etricas internas (silhueta, estabilidade dos \textit{clusters} e
+plausibilidade f\'isica) na aus\^encia de \textit{ground truth} completo.
+
+
+\section{Considera\c{c}\~oes Finais}
+
+Este artigo fundamentou, descreveu e avaliou preliminarmente a arquitetura de
+um sistema NILM constru\'ido sob o paradigma \textit{Edge-to-Server}, operando
+em ambiente residencial real n\~ao controlado. O trabalho demonstrou que a
+supera\c{c}\~ao das limita\c{c}\~oes inerentes a \textit{hardwares} de recursos
+restritos e de baixo custo requer decis\~oes de engenharia criteriosas.
+
+A ado\c{c}\~ao do transformador ZMPT101B em modo \textit{standalone} eliminou
+n\~ao-linearidades de condicionamento na aferi\c{c}\~ao de tens\~ao. Al\'em disso,
+an\'alises confirmaram que depender unicamente do m\'odulo ADC nativo do ESP32
+esbarra no limite do processador de aproxima\c{c}\~ao sucessiva, acionamento do
+temporizador de vigia em frequ\^encias elevadas e indisponibilidade do ADC2 em uso
+conjunto com o Wi-Fi \cite{ref8}. Ao reestruturar o projeto de forma h\'ibrida, as
+rotinas de aquisi\c{c}\~ao de alta velocidade foram isoladas no STM32H743,
+enquanto o tr\'afego MQTT com a nuvem ficou perfeitamente atendido pelo ESP32.
+Essa abordagem viabilizou a corre\c{c}\~ao anal\'itica da defasagem dos
+transdutores e o c\'alculo ininterrupto da pot\^encia e da DHT sem ocorr\^encia
+de \textit{jitter}.
+
+No dom\'inio do aprendizado de m\'aquina, os resultados preliminares revelaram dois
+achados relevantes. Primeiro, a clusteriza\c{c}\~ao K-means discrimina assinaturas
+de eventos em janelas curtas (silhueta de 0{,}46 com um dia de dados), mas a
+resolu\c{c}\~ao fina se degrada conforme eventos de baixa pot\^encia se acumulam:
+com dois dias de coleta, o $K$ \'otimo colapsa de dez para tr\^es grupos, absorvendo
+os aparelhos de pot\^encia m\'edia na massa de eventos irresol\'uveis. Apenas as
+cargas de maior pot\^encia permanecem separ\'aveis de forma est\'avel -- o que
+revela uma limita\c{c}\~ao consistente com as n\~ao-linearidades dos transdutores
+em baixa corrente. Segundo, um teste de nulidade por permuta\c{c}\~ao demonstrou
+que as caracter\'isticas harm\^onicas -- absolutas ou em varia\c{c}\~ao --,
+apesar da aquisi\c{c}\~ao de alta fidelidade na borda, n\~ao agregam informa\c{c}\~ao
+discriminativa ao agrupamento baseado em eventos neste cen\'ario. O achado
+orienta os pr\'oximos passos: melhoria do condicionamento harm\^onico e
+sele\c{c}\~ao supervisionada de caracter\'isticas.
+
+Como pr\'oximos passos imediatos, destacam-se a conclus\~ao da rotulagem
+\textit{a posteriori} das classes descobertas e a avalia\c{c}\~ao quantitativa
+(\textit{F1-macro}) dos classificadores supervisionados (KNN, SVM e
+\textit{Random Forest}) sobre os eventos rotulados.
+
+
+% -----------------------------------------------------------------------
+% DECLARAÇÃO DE IA GENERATIVA (obrigatória pela política SBC, se aplicável)
+% Descomente e preencha se ferramentas de IA foram utilizadas na redação.
+% -----------------------------------------------------------------------
+\section*{Declara\c{c}\~ao de Uso de Intelig\^encia Artificial Generativa}
+Este artigo utilizou a ferramenta Claude Opus 4.8 (Anthropic) como
+aux\'ilio na revis\~ao textual e estrutura\c{c}\~ao do artigo.
+Todo o conte\'udo foi verificado, validado e \'e de inteira responsabilidade
+dos autores.
+
+\begin{thebibliography}{99}
+
+\bibitem{ref1} HART, G. W. Nonintrusive appliance load monitoring.
+  \textit{Proceedings of the IEEE}, v.~80, n.~12, p.~1870--1891, 1992.
+
+\bibitem{ref2} ZOHA, A. et al. Non-Intrusive Load Monitoring Approaches for
+  Disaggregated Energy Sensing: A Survey. \textit{Sensors}, v.~12,
+  p.~16838--16866, 2012.
+
+\bibitem{ref3} CHATTERJEE, A.; HEER, P. Non-Intrusive Load Monitoring (NILM)
+  with very low-frequency data from smart meters in Switzerland.
+  \textit{Energy and Buildings}, v. 344, 116002, 2025.
+
+\bibitem{ref4} KALINKE, F. et al. An Evaluation of NILM Approaches on
+  Industrial Energy-Consumption Data. In: \textit{The Twelfth ACM
+  International Conference on Future Energy Systems (e-Energy '21)}, 2021.
+
+\bibitem{ref5} ZHANG, C. et al. Sequence-to-point learning with neural
+  networks for non-intrusive load monitoring. In: \textit{AAAI Conference on
+  Artificial Intelligence}, 2018.
+
+\bibitem{ref6} GARCIA, F. D. et al. NILM-based approach for energy efficiency
+  assessment of household appliances. \textit{Energy Informatics}, v.~3,
+  n.~10, 2020.
+
+\bibitem{ref7} NOUROLLAHI, H. et al. Non-Intrusive Load Monitoring using
+  Machine Learning and Deep Learning Techniques. \textit{Electronics}, v.~13,
+  n.~1420, 2024.
+
+\bibitem{ref8} RESENDE, R. A. O.; PESTANA NETO, A.; RAMOS, J. J. G.
+  Caracter\'isticas da convers\~ao anal\'ogico-digital (ADC -- Analog to
+  Digital Conversion) nativa do microcontrolador ESP32: uma discuss\~ao. In:
+  \textit{Semin\'ario em Tecnologia da Informa\c{c}\~ao do Programa de
+  Capacita\c{c}\~ao Institucional (PCI) do CTI Renato Archer XII}, 2022.
+
+\end{thebibliography}
+
+\end{document}
