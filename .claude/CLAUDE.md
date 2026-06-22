@@ -103,7 +103,10 @@ After /clear or /compact: knowledge base and session stats preserved. Use `ctx p
 | Driver display | `STM-Amostrador/Core/Src/st7735.c` | SPI bit-bang para ST7735 80×160 |
 | ESP32 bridge | `ESP32-Bridge/src/main.cpp` | Ponte UART↔USB transparente |
 | ESP32 IoT | `ESP-Network/src/main.cpp` | WiFi + MQTT + kWh + LittleFS |
-| Monitor Python | `python-monitor/monitor.py` | GUI PyQt5 + gravação + export NILMTK |
+| Monitor Python | `python-monitor/monitor.py` | GUI PyQt5 — visualização via ESP32-Bridge |
+| Ingestor MQTT | `python-monitor/mqtt_ingest.py` | Assinante MQTT → CSV (roda no servidor .80) |
+| Artigo | `docs/artigo/main.tex` | Artigo SBC — 7 seções, 3 figuras reais |
+| NILMTK local | `nilmtk/` | Fork editável — Hart85 e CO funcionam; FHMM bloqueado (hmmlearn sem wheel Python 3.14) |
 
 ## Constantes de protocolo — devem estar sincronizadas entre STM32 e Python
 
@@ -152,8 +155,33 @@ Taxa de transmissão estimada (steady state):
 - Frames harmônicos: 2 × 413 × 1.5 Hz = 1.239 bytes/s
 - Total: ~32.889 bytes/s × 10 bits/byte = ~329 kbps < 460800 baud ✓
 
+## Pipeline MQTT / Servidor
+
+- Broker: Mosquitto em `192.168.1.80:1883`, allow_anonymous, bind 0.0.0.0
+- Tópicos: `energia/medidor` (potência por fase) e `energia/harmonicas`
+- `mqtt_ingest.py` roda como Task Scheduler (`/ru server /rp <pass>`) — reinício automático com `goto loop`
+- Q gravado como `abs(Q)` — STM32 calcula magnitude √(S²−P²), sem sinal
+- Credenciais servidor: usuário `server` — senha em variável de ambiente (não commitar)
+
+## Análise NILM — resultados Jun/2026
+
+- Detector Hart próprio (`_events.py`): limiar 50 W, baseline deslizante por fase
+- K-means (ΔP, ΔQ): K=10/sil=0,44 em 1 dia → K=3/sil=0,74 em 2 dias (diluição por inverter)
+- Subconjunto limpo |ΔP|>200 W: K=4, silhueta=0,50 (motor ~2,3 kW vs resistivos ~800 W)
+- Teste de nulidade harmônicos: real ≈ embaralhado — harmônicos não discriminam eventos
+- Hart85 NILMTK vs detector próprio: F2 <0,5% de diferença; F1 ~16% (parâmetros internos)
+- FHMM bloqueado: hmmlearn não tem wheel para Python 3.14
+
+## Artigo (docs/artigo/main.tex)
+
+- 7 seções completas (SBC template, pt-BR)
+- 3 figuras reais: `clusters_1d2d.png`, `degradacao.png`, `ablacao_harmonicos.png`
+- 2 placeholders restantes: `fig:pipeline` (diagrama arquitetura) e `fig:resultados` (métricas — intencionalmente aguardando ground truth)
+- Figura extra (não no artigo): `nilmtk_hart85_series.png` — comparativo visual Hart85
+
 ## Pendências conhecidas
 
 - **ESP-Network** parser de amostras ainda usa `int16` — precisa migrar para `int32` (tamanho frame 0x01/0x03 muda de 543 → 1055).
 - Schottky GND recomendado nos pinos PC4/PC5 (excursão negativa do SCT013 não é protegida pelo Zener).
 - `SCT013_SIGN = -1.0f` porque o clamp está invertido no fio; reverter para `+1.0f` se reinstalar o CT na orientação correta.
+- `fig:pipeline` e `fig:resultados` no artigo têm `\label` sem `\ref` — geram warning no LaTeX (não fatal).

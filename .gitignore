@@ -8,8 +8,8 @@ STM-Amostrador/build
 STM-Amostrador/.settings
 
 # Dados gravados em runtime (medições / harmônicos)
-*.csv
-*.h5
+#*.csv
+#*.h5
 
 # Helpers de deploy/diagnostico (alguns com credenciais hardcoded) — nunca commitar
 python-monitor/_*.py
@@ -22,3 +22,5 @@ __pycache__/
 # credenciais (ex.: senha SSH). Nao commitar.
 .claude/settings.json
 .claude/settings.local.json
+
+nilmtk/

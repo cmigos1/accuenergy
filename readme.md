@@ -1,6 +1,6 @@
 # AccuEnergy — Medidor bifásico de energia elétrica
 
-Sistema embarcado de medição de qualidade de energia com aquisição bifásica simultânea, análise de harmônicos via Goertzel e visualização em tempo real via Python.
+Sistema NILM (*Non-Intrusive Load Monitoring*) Edge-to-Server de baixo custo: aquisição bifásica em alta frequência no STM32H743, transmissão via MQTT e desagregação por aprendizado de máquina no servidor.
 
 ---
 
@@ -16,22 +16,22 @@ Rede elétrica
    └── SCT013-100 (F2) ─► PC5 ─┤│ ADC2 (DMA2 Stream1)
                                 ││
                          STM32H743 (WeAct)
-                         TIM2 @ 15360 Hz
-                         1024 amostras / frame
-                         ↓ LPUART1 460800 baud (PA9)
+                         TIM2 @ 15360 Hz · 1024 amostras/frame
+                         Goertzel h1..h50 · P/Q/S/FP/THD
+                         ↓ LPUART1 460800 baud
                          ↓
-                     GPIO16 ESP32
-                         │
-             ┌───────────┴──────────────────┐
-             │ ESP32-Bridge                  │ ESP-Network
-             │ (ponte USB transparente)      │ (WiFi + MQTT + kWh)
-             └───────────┬──────────────────┘
-                         │ USB Serial 460800
+                     GPIO16 ESP32 (ESP-Network)
+                     WiFi · MQTT · kWh · NTP
+                         │ MQTT JSON
                          ▼
-                  Python monitor
-                  (PyQt5 + pyqtgraph)
-                  Visualização em tempo real
-                  Gravação + Export NILMTK HDF5
+              Mosquitto broker (192.168.1.80:1883)
+              energia/medidor · energia/harmonicas
+                         │
+                  mqtt_ingest.py
+                  (assinante · CSV logger)
+                         │
+                  Análise NILM (Python)
+                  detecção Hart · K-means · teste nulidade
 ```
 
 ---
@@ -55,11 +55,21 @@ accuenergy/
 ├── ESP-Network/             # Firmware ESP32 — nó IoT WiFi/MQTT (PlatformIO)
 │   └── src/
 │       ├── main.cpp
-│       └── config.h         # SSID, senha, broker MQTT
+│       └── config.h         # SSID, senha, broker MQTT (192.168.1.80)
 │
-└── python-monitor/          # Monitor em tempo real (Python 3.10+)
-    ├── monitor.py
-    └── requirements.txt
+├── python-monitor/          # Scripts de ingestão e análise (Python 3.10+)
+│   ├── monitor.py           # GUI PyQt5 — visualização via ESP32-Bridge
+│   ├── mqtt_ingest.py       # Assinante MQTT → CSV logger (roda no servidor)
+│   └── data/                # CSVs coletados (excluídos do git via .gitignore)
+│       ├── medicoes*.csv
+│       ├── harmonicas*.csv
+│       └── res_*/           # Artefatos de clustering (clusters.png, etc.)
+│
+├── nilmtk/                  # Fork local do NILMTK (instalado com pip install --no-deps -e .)
+│
+└── docs/artigo/             # Artigo SBC (LaTeX)
+    ├── main.tex
+    └── figuras/
 ```
 
 ---
@@ -248,18 +258,18 @@ Nó IoT autônomo. Faz parsing próprio dos frames e publica via MQTT com timest
 
 | Tópico MQTT | Conteúdo |
 |---|---|
-| `energia/medicoes` | `{vrms, irms, fp, preal, q, s, kwh, ts}` |
-| `energia/harmonicas` | `{thd_v, thd_i, harm_v[50], harm_i[50]}` |
+| `energia/medidor` | `{phase, vrms, irms, fp, preal, q, s, kwh, ts}` |
+| `energia/harmonicas` | `{phase, thd_v, thd_i, hv1..hv50, hi1..hi50, ts}` |
 
 Persistência: kWh acumulado salvo em LittleFS (`/kwh.bin`) a cada 60 s.
+
+Throttle de publicação: 500 ms por fase. Retain desativado (overload explícito `publish(topic, payload, len, false)`).
 
 > **Atenção (pendente):** o ESP-Network ainda usa `int16` no parser de amostras. Após a migração do STM32 para `int32` (Jun/2026), o campo `SKIP_SAMPLES` e o tamanho do frame precisam ser atualizados em `ESP-Network/src/main.cpp`.
 
 ---
 
-## Python Monitor
-
-### Instalação
+## Python Monitor (via ESP32-Bridge)
 
 ```bash
 cd python-monitor
@@ -267,44 +277,57 @@ pip install -r requirements.txt
 python monitor.py [--port COM5] [--baud 460800]
 ```
 
-### Interface
+GUI PyQt5 para visualização em tempo real via porta serial (ESP32-Bridge). Exibe Vrms, Irms, P, Q, S, FP, THD e espectro harmônico h1..h50 para as duas fases simultaneamente.
 
-**Métricas (topo):** 2 linhas × 8 cards — Vrms, Irms, P, Q, S, FP, THD_V, THD_I para F1 e F2.
+---
 
-**Gráficos de onda (esquerda):**
-- Plot superior — Fase 1: V1(t) eixo esquerdo (azul) / I1(t) eixo direito (rosa)
-- Plot inferior — Fase 2: V2(t) eixo esquerdo (teal) / I2(t) eixo direito (peach)
-- Linhas tracejadas indicam Vrms_pico e Irms_pico em cada fase
-- Eixo X linkado: zoom/pan sincronizados entre os dois plots
+## Pipeline de ingestão MQTT
 
-**Harmônicos (direita):** barras F1 e F2 lado a lado, h1..h50.
+`mqtt_ingest.py` roda no servidor dedicado (192.168.1.80) como serviço persistente (Windows Task Scheduler). Assina os dois tópicos e grava CSVs com rotação automática de schema.
 
-### Gravação e exportação NILMTK
-
-```
-1. Escreva o nome da carga → Gravar  (coleta frames com timestamp UTC)
-2. Parar                            (finaliza o segmento)
-3. Repita para cada carga
-4. Export → <arquivo>.h5 + <arquivo>.metadata.json
+```bash
+python mqtt_ingest.py [--broker 192.168.1.80] [--port 1883]
 ```
 
-```python
-from nilmtk import DataSet
-ds = DataSet('dataset.h5')
-elec = ds.buildings[1].elec
-# meter1, meter2... = um por segmento (ou por fase se bifásico)
-```
+**Arquivos gerados:**
 
-**Colunas do HDF5 (MultiIndex NILMTK):**
-
-| Coluna | Unidade |
+| Arquivo | Colunas |
 |---|---|
-| `('power', 'active')` | W |
-| `('power', 'apparent')` | VA |
-| `('power', 'reactive')` | VAr |
-| `('voltage', '')` | V |
-| `('current', '')` | A |
-| `('power', 'factor')` | — |
+| `medicoes_AAAA-MM-DD.csv` | ts, phase, vrms, irms, preal, s, q, fp, kwh |
+| `harmonicas_AAAA-MM-DD.csv` | ts, phase, thd_v, thd_i, hv1..hv50, hi1..hi50 |
+
+> `q` é gravado como `abs(Q)` — o STM32 calcula Q = √(S²−P²), magnitude não sinalizada.
+
+---
+
+## Análise NILM
+
+Scripts em `python-monitor/` (prefixo `_`, não versionados — contêm caminhos locais):
+
+| Script | Função |
+|---|---|
+| `_events.py` | Detector Hart sliding-baseline → `eventos_*.csv` |
+| `_export_events.py` | Exporta ΔP, ΔQ por evento |
+| `_merge_harm.py` | Join eventos ↔ harmônicos (`merge_asof` por fase) |
+| `_dharm_test.py` | Teste de nulidade: Δharmônico real vs embaralhado |
+| `_compara.py` | K-means 1 dia vs 2 dias · degradação temporal |
+| `_harm_fig.py` | Figura ablação harmônicos para o artigo |
+| `_nilmtk_analysis.py` | Hart85 do NILMTK sobre os dados reais |
+
+### Resultados principais (Jun/2026)
+
+- K-means (ΔP, ΔQ): K=10 silhueta 0,44 em 1 dia → K=3 silhueta 0,74 em 2 dias (diluição por inverter)
+- Subconjunto limpo (|ΔP| > 200 W): K=4, silhueta 0,50 — motor ~2,3 kW vs resistivos ~800 W
+- Harmônicos (teste de nulidade): real ≈ embaralhado — sem contribuição discriminativa
+- Hart85 NILMTK vs detector próprio: F2 diverge <0,5%; F1 ~16% por diferença de parâmetros internos
+
+### NILMTK — instalação local
+
+```bash
+# Fork em ./nilmtk/ — Python 3.14 (hmmlearn sem wheel → FHMM indisponível)
+pip install --no-deps -e ./nilmtk
+pip install h5py networkx pyyaml tqdm pytz ipython nilm_metadata
+```
 
 ---
 
