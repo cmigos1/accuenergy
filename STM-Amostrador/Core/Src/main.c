@@ -118,7 +118,6 @@ static void Calibrate_Acquire(uint8_t phase);
 static uint8_t Calibrate_Phase(uint8_t phase, float *out_vrms, float *out_irms);
 static void Calibrate_NoiseFloor(void);
 static void Sampler_ComputeAndSend(PhaseData *ph, uint8_t frameType);
-static float Goertzel_Magnitude(float *x, uint32_t N, uint32_t bin);
 static void Harmonics_Compute(PhaseData *ph);
 static void Send_HarmonicsFrame(PhaseData *ph, uint8_t frameType);
 static void Debug_SendStatus(void);
@@ -442,25 +441,32 @@ static void Sampler_ComputeAndSend(PhaseData *ph, uint8_t frameType)
     HAL_UART_Transmit(&hlpuart1, footer,              2u,           10u);
 }
 
-/* Goertzel — magnitude de pico normalizada do bin k para sinal x[N] */
-static float Goertzel_Magnitude(float *x, uint32_t N, uint32_t bin)
-{
-    float omega = 2.0f * (float)M_PI * (float)bin / (float)N;
-    float coeff = 2.0f * cosf(omega);
-    float sp = 0.0f, sp2 = 0.0f, s;
-    for (uint32_t n = 0u; n < N; n++) {
-        s   = x[n] + coeff * sp - sp2;
-        sp2 = sp;
-        sp  = s;
-    }
-    float re = sp - sp2 * cosf(omega);
-    float im =      sp2 * sinf(omega);
-    return 2.0f * sqrtf(re * re + im * im) / (float)N;
-}
+/* ── CMSIS-DSP RFFT — substitui 100× Goertzel por 2× FFT ─────────────────
+ * arm_rfft_fast_f32 opera in-place e produz saída complexa intercalada:
+ *   out[0] = DC (real), out[1] = Nyquist (real),
+ *   out[2k] = Re(bin k), out[2k+1] = Im(bin k)  para k = 1..N/2-1
+ *
+ * Magnitude normalizada = 2 × |bin| / N  (mesma escala do Goertzel anterior)
+ */
+static arm_rfft_fast_instance_f32 fftInst;
+static uint8_t fftInitDone = 0u;
 
-/* Calcula magnitudes dos harmônicos 1..HARM_MAX e THD para V e I da fase 'ph' */
+/* Buffer de trabalho para saída complexa da FFT (N+2 floats para RFFT real) */
+static float fftOut[NUM_SAMPLES + 2u];
+static float fftMag[NUM_SAMPLES / 2u + 1u];   /* magnitudes de cada bin */
+
+/* Calcula magnitudes dos harmônicos 1..HARM_MAX e THD para V e I da fase 'ph'.
+ * Usa CMSIS-DSP arm_rfft_fast_f32 (radix-4/2 butterfly, otimizado para Cortex-M7)
+ * em vez do Goertzel anterior — ~5-10× mais rápido para 50 harmônicos. */
 static void Harmonics_Compute(PhaseData *ph)
 {
+    /* Inicializa instância FFT uma única vez (tabelas twiddle são const em flash) */
+    if (!fftInitDone) {
+        arm_rfft_fast_init_1024_f32(&fftInst);
+        fftInitDone = 1u;
+    }
+
+    /* ── Remove DC offset e converte para unidades físicas ──────────────── */
     double sumV = 0.0, sumI = 0.0;
     for (uint32_t i = 0u; i < NUM_SAMPLES; i++) {
         sumV += ph->vRaw[i];
@@ -474,13 +480,43 @@ static void Harmonics_Compute(PhaseData *ph)
         ph->iFloat[i] = ((float)ph->iRaw[i] - meanI) * CAL_I;
     }
 
-    ph->harmMagV[0u] = 0.0f;
-    ph->harmMagI[0u] = 0.0f;
-    for (uint32_t h = 1u; h <= HARM_MAX; h++) {
-        ph->harmMagV[h] = Goertzel_Magnitude(ph->vFloat, NUM_SAMPLES, h * F0_BIN);
-        ph->harmMagI[h] = Goertzel_Magnitude(ph->iFloat, NUM_SAMPLES, h * F0_BIN);
+    /* ── FFT de tensão ──────────────────────────────────────────────────── */
+    /* arm_rfft_fast_f32 opera in-place no buffer de entrada (ph->vFloat),
+     * mas a saída vai para fftOut. O buffer de entrada é destruído. */
+    arm_rfft_fast_f32(&fftInst, ph->vFloat, fftOut, 0u);  /* 0 = forward FFT */
+
+    /* Bin 0 (DC) e bin N/2 (Nyquist): empacotados em fftOut[0] e fftOut[1] */
+    fftMag[0] = fabsf(fftOut[0]) / (float)NUM_SAMPLES;   /* DC — não usado */
+
+    /* Bins 1..N/2-1: complexos intercalados em fftOut[2..N-1] */
+    arm_cmplx_mag_f32(&fftOut[2], &fftMag[1], NUM_SAMPLES / 2u - 1u);
+    /* Normaliza: magnitude = 2×|bin|/N (amplitude de pico da senoide) */
+    for (uint32_t k = 1u; k < NUM_SAMPLES / 2u; k++) {
+        fftMag[k] = 2.0f * fftMag[k] / (float)NUM_SAMPLES;
     }
 
+    ph->harmMagV[0u] = 0.0f;
+    for (uint32_t h = 1u; h <= HARM_MAX; h++) {
+        uint32_t bin = h * F0_BIN;
+        ph->harmMagV[h] = (bin < NUM_SAMPLES / 2u) ? fftMag[bin] : 0.0f;
+    }
+
+    /* ── FFT de corrente ────────────────────────────────────────────────── */
+    arm_rfft_fast_f32(&fftInst, ph->iFloat, fftOut, 0u);
+
+    fftMag[0] = fabsf(fftOut[0]) / (float)NUM_SAMPLES;
+    arm_cmplx_mag_f32(&fftOut[2], &fftMag[1], NUM_SAMPLES / 2u - 1u);
+    for (uint32_t k = 1u; k < NUM_SAMPLES / 2u; k++) {
+        fftMag[k] = 2.0f * fftMag[k] / (float)NUM_SAMPLES;
+    }
+
+    ph->harmMagI[0u] = 0.0f;
+    for (uint32_t h = 1u; h <= HARM_MAX; h++) {
+        uint32_t bin = h * F0_BIN;
+        ph->harmMagI[h] = (bin < NUM_SAMPLES / 2u) ? fftMag[bin] : 0.0f;
+    }
+
+    /* ── THD ────────────────────────────────────────────────────────────── */
     float sumV2 = 0.0f, sumI2 = 0.0f;
     for (uint32_t h = 2u; h <= HARM_MAX; h++) {
         sumV2 += ph->harmMagV[h] * ph->harmMagV[h];

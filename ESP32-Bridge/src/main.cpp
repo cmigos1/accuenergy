@@ -8,14 +8,14 @@
  * USB Serial (UART0) → PC @ 460800 baud
  *
  * Frames do STM32 (protocolo binário) — análise bifásica:
- *   0x01 Power F1 : AB CD 01 + 6×f32 + 128×2×i16 + EF FE = 543 bytes @ ~15 Hz
+ *   0x01 Power F1 : AB CD 01 + 6×f32 + N(u8) + step(u8) + 128×2×i32 + EF FE = 1055 bytes @ ~15 Hz
  *   0x02 Harm  F1 : AB CD 02 + 2×f32 + 100×f32  + EF FE = 413 bytes @ ~1.5 Hz
- *   0x03 Power F2 : AB CD 03 + (mesmo layout 0x01)       = 543 bytes @ ~15 Hz
+ *   0x03 Power F2 : AB CD 03 + (mesmo layout 0x01)       = 1055 bytes @ ~15 Hz
  *   0x04 Harm  F2 : AB CD 04 + (mesmo layout 0x02)       = 413 bytes @ ~1.5 Hz
  *   '#' lines     : debug ASCII, passadas integralmente ao PC
  *
  * A ponte é transparente (byte-a-byte), então os 4 tipos passam sem alteração
- * de lógica — só foram ampliados os buffers para o rajada bifásica (até ~1.9 KB
+ * de lógica — só foram ampliados os buffers para o rajada bifásica (até ~3.3 KB
  * por janela: 0x01+0x03+0x02+0x04).
  *
  * LED onboard (GPIO2) pisca ao receber dados do STM32.

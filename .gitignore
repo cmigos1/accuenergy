@@ -24,3 +24,7 @@ __pycache__/
 .claude/settings.local.json
 
 nilmtk/
+
+# CMSIS-DSP (ARM DSP library clonada em STM-Amostrador/Drivers/CMSIS-DSP)
+# Para clonar: git clone --depth 1 https://github.com/ARM-software/CMSIS-DSP.git STM-Amostrador/Drivers/CMSIS-DSP
+STM-Amostrador/Drivers/CMSIS-DSP/

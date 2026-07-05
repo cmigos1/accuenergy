@@ -60,9 +60,16 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
+# ── CMSIS-DSP ────────────────────────────────────────────────────────────────
+set(CMSISCORE "${CMAKE_SOURCE_DIR}/Drivers/CMSIS" CACHE PATH "CMSIS Core headers")
+set(DISABLEFLOAT16 ON CACHE BOOL "No float16 on Cortex-M7")
+set(CMSISDSP_INSTALL OFF CACHE BOOL "Skip install targets")
+add_subdirectory(Drivers/CMSIS-DSP)
+
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
+    CMSISDSP
 
     # Add user defined libraries
 )

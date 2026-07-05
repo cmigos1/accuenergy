@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include "arm_math.h"
 
 /* SCT013-100 (100A:50mA) — burden 50 Ω (era 11 Ω) para maior sensibilidade em baixas correntes.
  *   Zener 1N4728A (3.3V) protege excursão positiva: sem ele V_ADC_max = 1.65 + 50mA×50Ω = 4.15V > VDDA.
